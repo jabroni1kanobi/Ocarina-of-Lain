@@ -936,7 +936,7 @@ static int test_mirror(const GfxBackend *b, uint8_t *guest, int *bytes) {
     return 0;
 }
 
-// A pool of zero bytes (NX2navi makes some now and then) initialises as an empty pool: no
+// A pool of zero bytes (Ocarina of Lain makes some now and then) initialises as an empty pool: no
 // Vulkan buffer or memory (a buffer or import of 0 bytes is invalid usage) and no pool index entry, so a lookup at its
 // address still finds the pool that starts there, before and after the empty pool's Finalize.
 static int test_empty_pool(const GfxBackend *b, uint8_t *guest) {

@@ -109,7 +109,7 @@
  "warn.dlss_kept": "安装文件夹中已有 DLSS 库（{path}）；安装程序将保留它。",
  "warn.dlss_download_failed": "无法从 {url} 下载 NVIDIA DLSS：{detail}。游戏无需它也能运行；下次运行安装程序时会重试。",
 
- "ui.title": "NX2navi 安装程序",
+ "ui.title": "Ocarina of Lain 安装程序",
  "ui.rebuild_title": "正在为你的模组重新构建游戏",
  "ui.start_game": "启动游戏",
  "ui.version": "版本 {version}",
@@ -186,8 +186,8 @@
  "param.input.update": "更新",
  "param.input.keys": "密钥",
 
- "launcher.title": "NX2navi 安装程序",
- "launcher.python_missing": "安装文件不完整：NX2navi-Setup.exe 旁边缺少 python 文件夹。请重新解压整个压缩包，然后从解压出的文件夹中启动 NX2navi-Setup.exe。",
+ "launcher.title": "Ocarina of Lain 安装程序",
+ "launcher.python_missing": "安装文件不完整：OcarinaOfLain-Setup.exe 旁边缺少 python 文件夹。请重新解压整个压缩包，然后从解压出的文件夹中启动 OcarinaOfLain-Setup.exe。",
 
  "lang.ja": "日语",
  "lang.en-US": "英语（美国）",

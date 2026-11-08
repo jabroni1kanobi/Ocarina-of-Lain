@@ -116,7 +116,7 @@ static uint32_t slots_gen = 1;
 static uint32_t samp_gen = 1;   // bumped whenever a sampler slot is registered: vk_sampler_by_id may answer otherwise
 static uint64_t n_checks;    // draw-binding storage checks (make_fresh_snap) since the last perf line
 // tex_gen per storage address (hashed): a slot resolves through the entries at its own address only (slot_resolve), so
-// a slot's resolution stays valid while its address's generation does. NX2navi finalizes and initializes transient
+// a slot's resolution stays valid while its address's generation does. Ocarina of Lain finalizes and initializes transient
 // textures every frame: about 90 tex_gen and 160 slots_gen bumps per frame in the monsters fight, one every 16 draws,
 // which emptied every cache keyed on the global generations. 65536 buckets, the most the 16-bit index of sinfo,
 // slot_bucket and the dirty ring's bucket entries holds: with 4096, about 8 slots shared each bucket, and every
@@ -354,7 +354,7 @@ static void init_image(Tex *e, VkCommandBuffer cb) {
     }
 }
 
-// NX2NAVI_SHADOW_SCALE (1 to 4): the game's shadow maps are made this many times larger on each side. NX2navi renders its
+// NX2NAVI_SHADOW_SCALE (1 to 4): the game's shadow maps are made this many times larger on each side. Ocarina of Lain renders its
 // sun cascades into a 960x960 DEPTH16 2D array of 4 layers and its static shadows into 1440x1440 and 720x720 arrays of 2,
 // whatever the output resolution, and shrinks the cascades under load (872, 848, 800, 480 and so on). Those are made
 // larger here: render passes into them scale the game's viewports and scissors (vk_exec.c resolve_rt, pass_scale),
@@ -644,7 +644,7 @@ static void destroy_tex(Tex *e) {
 }
 
 // Released entries with another descriptor at the same address are replaced; past RELEASED_MAX released entries the
-// oldest one goes at each release (it comes back on demand, a mirrored one re-uploaded from its storage). NX2navi
+// oldest one goes at each release (it comes back on demand, a mirrored one re-uploaded from its storage). Ocarina of Lain
 // finalizes and initializes transient textures every frame, so a released entry is mostly taken back within frames.
 // Dropping all of them at once when the count passed 4096 destroyed thousands of images in one frame: 333-422 ms
 // frames every 40-50 s on a GTX 1050 Ti, then the textures still in use were created and uploaded again.
@@ -954,7 +954,7 @@ static volatile int32_t n_kept;
 
 // vk_mem_changed over the pages wholly inside e's storage (all of its pages when it fills none): a neighbour that shares
 // the first or last page does not count as a write to e. A texture that fills no page shares all of its pages, so
-// there a page write counts only when e's own bytes differ from the copy taken at the GPU write. NX2navi's Purah Pad
+// there a page write counts only when e's own bytes differ from the copy taken at the GPU write. Ocarina of Lain's Purah Pad
 // camera renders the ID, screen rect and depth of what is under the reticle into 4x4 targets of 512 bytes, two
 // slots used in turn, and the CPU reads them a frame later. One slot's rect target shares its page with data the CPU
 // writes every frame: without the copy its renders were never written back, the game read a zero rect every other
@@ -1207,7 +1207,7 @@ static void wb_cfg_init(void) {
 
 // Whether the fence write-back takes a dirty target. A target the GPU draws every frame is scratch the CPU does not
 // read: in Hyrule Field three 256x256 RGBA8 targets and a 256x256 RG8 one, which cost 2.7 ms a frame to write back.
-// NX2navi's 260x260 RG8 grass maps, which its fire spread reads after a fence wait (#132), are drawn once per change, or
+// Ocarina of Lain's 260x260 RG8 grass maps, which its fire spread reads after a fence wait (#132), are drawn once per change, or
 // up to 9 frames in a row while a tile loads.
 static int wb_wanted(const Tex *e) { return e->t.L.size <= wb_limit || e->run < WB_RUN; }
 
@@ -1785,7 +1785,7 @@ void vk_write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, co
 
 // ---------------------------------------------------------------- CPU reads of GPU-written storage
 // A mirrored texture the GPU rendered into holds its texels in its image only; its storage keeps what the CPU last put
-// there. The game may still read that storage with the CPU: NX2navi moves its generated grass maps between pools with
+// there. The game may still read that storage with the CPU: Ocarina of Lain moves its generated grass maps between pools with
 // memcpy once the GPU is done, and the copy then carried zeros. Such a read writes the image back first.
 //
 // Every level and layer of every texture in v is copied to staging in one upload batch with one wait: one GPU round
@@ -1892,7 +1892,7 @@ uint64_t vk_texture_dirty_fence(uint64_t addr, uint64_t size) {
     return f;
 }
 
-// The image is the newest content only while nothing wrote the storage since the GPU render: NX2navi finalizes grass maps,
+// The image is the newest content only while nothing wrote the storage since the GPU render: Ocarina of Lain finalizes grass maps,
 // reuses their storage for new data and memcpys that data on, and writing the old image back first handed the copy
 // a stale map or stale resource bytes (wrong textures in the distance). Every hit is checked before any is written
 // back, since a write-back is itself a CPU write to storage another hit may share; the hits then go back oldest render
@@ -1919,7 +1919,7 @@ void vk_texture_write_back(uint64_t addr, uint64_t size) {
     unlock();
 }
 
-// NX2navi's grass system renders a 128x128 RGBA8 map of cut and trampled grass into a CPU-cached pool every frame and its
+// Ocarina of Lain's grass system renders a 128x128 RGBA8 map of cut and trampled grass into a CPU-cached pool every frame and its
 // CPU code reads the pool bytes without nvnMemoryPoolInvalidateMappedRange (cut reactions: blades, insects, the cut
 // itself). On the Switch the bytes are there once the frame's fence has passed. So when the
 // CPU waits for a fence, mirrored targets rendered by work up to that fence go back to their storage (wb_wanted:

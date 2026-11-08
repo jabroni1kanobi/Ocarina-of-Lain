@@ -2,10 +2,10 @@
 
 [input]
 # The base game, dumped from your own console as NSP or XCI.
-base = 'C:\Games\NX2navi\base.nsp'
+base = 'C:\Games\Ocarina of Lain\base.nsp'
 # The update NSP, identified by its code hash; 1.1.1 is supported.
 # Leave the list empty to build the base version.
-updates = ['C:\Games\NX2navi\update-1.1.1.nsp']
+updates = ['C:\Games\Ocarina of Lain\update-1.1.1.nsp']
 # Keys dumped from your own console. Never printed or copied by the tools.
 keys = 'C:\Switch\prod.keys'
 # Optional: a firmware NCA directory (an unpacked firmware, or an emulator's installed registered/ directory).

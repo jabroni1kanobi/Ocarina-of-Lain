@@ -2,7 +2,7 @@
 // Frame rate: the frame limit and the real-time frame step, the host half of the patch sets fps60, realtime and cloth
 // (build tables patches-v121.txt, patches-v143.txt).
 //
-// NX2navi's adaptive present-interval controller (main+0x8f26c8) turns the main thread's measured work into a number of
+// Ocarina of Lain's adaptive present-interval controller (main+0x8f26c8) turns the main thread's measured work into a number of
 // 60 Hz ticks clamped to [minimum, maximum]; shipping data sets the minimum to 2 (30 fps), the set fps60 lowers it to
 // 1. The controller still raises the interval when a frame does not fit. Shipping code then steps the game by whole
 // vsyncs (VFR step main+0x7ede6c: ratio = interval * 0.5, seconds = interval / 60; global ratio at main+0x8f2394), so

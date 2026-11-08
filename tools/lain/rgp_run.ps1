@@ -1,8 +1,8 @@
-# Run NX2navi on a scratch profile under the RGP capture CLI; send 'c' when the log reaches given frames.
+# Run Ocarina of Lain on a scratch profile under the RGP capture CLI; send 'c' when the log reaches given frames.
 # rgp_run.ps1 -Name kok1 -Script kokiri_white.txt -Profile kokiri -CaptureAt 2880,3960 -StopAt 4200
 param(
   [string]$Name, [string]$Script, [string]$Profile = 'kokiri', [int[]]$CaptureAt = @(), [int]$StopAt = 4200,
-  [string]$Exe = 'C:\Users\Johnn\AppData\Local\Programs\NX2navi\game\ocarina.exe',
+  [string]$Exe = 'C:\Users\Johnn\AppData\Local\Programs\Ocarina of Lain\game\ocarina.exe',
   [switch]$NoRgp, [int]$FlightAt = 0, [hashtable]$Extra = @{}, [string]$CliExtra = '', [int]$TimeoutS = 400
 )
 $tools = 'C:\Users\Johnn\Games\nx2navi-tools'

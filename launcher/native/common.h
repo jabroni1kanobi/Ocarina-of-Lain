@@ -1,4 +1,4 @@
-/* Shared by NX2navi.exe (nx2navi.c) and NX2navi-Setup.exe (setup.c): paths, small files, shortcuts and the
+/* Shared by OcarinaOfLain.exe (nx2navi.c) and OcarinaOfLain-Setup.exe (setup.c): paths, small files, shortcuts and the
    uninstall entry. Wide-character Win32 throughout, so folder names in any language work. */
 #pragma once
 #define COBJMACROS
@@ -14,11 +14,11 @@
 #include <wchar.h>
 
 #define PATHN 1024
-#define APP_NAME L"NX2navi"
-#define UNINSTALL_KEY L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NX2navi"
+#define APP_NAME L"Ocarina of Lain"
+#define UNINSTALL_KEY L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Ocarina of Lain"
 /* The launcher window's taskbar identity (launcher/winsys.py app_id): a shortcut that carries it is the one the
    taskbar groups and pins the window under, with the shortcut's icon. */
-#define APP_USER_MODEL_ID L"NX2navi.Launcher"
+#define APP_USER_MODEL_ID L"OcarinaOfLain.Launcher"
 static const PROPERTYKEY NX_PKEY_AppUserModel_ID = {
     {0x9F4C2855, 0x9F79, 0x4B39, {0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3}}, 5};
 static const IID NX_IID_IPropertyStore = {0x886d8eeb, 0x8cf2, 0x4446, {0x8d, 0x02, 0xcd, 0xba, 0x1d, 0xbd, 0xcf, 0x99}};
@@ -140,14 +140,14 @@ static inline int shortcut_path(int desktop, wchar_t *out, size_t n)
     return swprintf(out, n, L"%ls\\%ls.lnk", dir, APP_NAME) > 0;
 }
 
-/* Create (on) or remove (off) the Desktop and/or Start menu shortcut to root\NX2navi.exe. */
+/* Create (on) or remove (off) the Desktop and/or Start menu shortcut to root\OcarinaOfLain.exe. */
 static inline int set_shortcut(const wchar_t *root, int desktop, int on)
 {
     wchar_t lnk[PATHN], target[PATHN];
     if (!shortcut_path(desktop, lnk, PATHN)) return 0;
     if (!on) return DeleteFileW(lnk) || GetLastError() == ERROR_FILE_NOT_FOUND;
-    swprintf(target, PATHN, L"%ls\\NX2navi.exe", root);
-    return make_shortcut(lnk, target, root, L"Play and update NX2navi");
+    swprintf(target, PATHN, L"%ls\\OcarinaOfLain.exe", root);
+    return make_shortcut(lnk, target, root, L"Play and update Ocarina of Lain");
 }
 
 static inline void reg_str(HKEY k, const wchar_t *name, const wchar_t *value)
@@ -160,7 +160,7 @@ static inline void reg_dword(HKEY k, const wchar_t *name, DWORD value)
     RegSetValueExW(k, name, 0, REG_DWORD, (const BYTE *)&value, sizeof value);
 }
 
-/* The entry in Settings > Apps that runs "NX2navi.exe --uninstall". */
+/* The entry in Settings > Apps that runs "OcarinaOfLain.exe --uninstall". */
 static inline int write_uninstall_entry(const wchar_t *root, const wchar_t *version, DWORD size_kb)
 {
     HKEY k;
@@ -171,9 +171,9 @@ static inline int write_uninstall_entry(const wchar_t *root, const wchar_t *vers
     reg_str(k, L"DisplayVersion", version);
     reg_str(k, L"Publisher", APP_NAME);
     reg_str(k, L"InstallLocation", root);
-    swprintf(buf, PATHN + 64, L"\"%ls\\NX2navi.exe\",0", root);
+    swprintf(buf, PATHN + 64, L"\"%ls\\OcarinaOfLain.exe\",0", root);
     reg_str(k, L"DisplayIcon", buf);
-    swprintf(buf, PATHN + 64, L"\"%ls\\NX2navi.exe\" --uninstall", root);
+    swprintf(buf, PATHN + 64, L"\"%ls\\OcarinaOfLain.exe\" --uninstall", root);
     reg_str(k, L"UninstallString", buf);
     reg_dword(k, L"NoModify", 1);
     reg_dword(k, L"NoRepair", 1);

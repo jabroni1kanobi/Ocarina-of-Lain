@@ -91,7 +91,7 @@ static HWND child(HWND parent, const wchar_t *cls, const wchar_t *text, DWORD st
 
 // Shows the window and waits for the answer. Returns 1 with the text in out (n units), 0 when cancelled.
 int text_entry_run(const SwkbdRequest *req, uint16_t *out, size_t cap, size_t *n) {
-    static const wchar_t cls[] = L"NX2naviTextEntry";
+    static const wchar_t cls[] = L"Ocarina of LainTextEntry";
     HINSTANCE inst = GetModuleHandleW(NULL);
     WNDCLASSEXW wc = {.cbSize = sizeof wc, .lpfnWndProc = entry_proc, .hInstance = inst,
                       .hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW), .hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1),

@@ -1,6 +1,6 @@
 """Extract the Switch system shared fonts (nn::pl) from the user's firmware into build/extracted/firmware/shared-fonts.
 
-NX2navi needs them only with Simplified Chinese, Korean or Traditional Chinese text: those font archives fall back to the
+Ocarina of Lain needs them only with Simplified Chinese, Korean or Traditional Chinese text: those font archives fall back to the
 Standard shared font (runtime/ov_system.c). The fonts come from the system data NCAs 0100000000000810..814 of a
 firmware NCA directory (an unpacked firmware, or an emulator's installed `registered` directory). The
 keys file named in config.local.toml decrypts them; key values are never printed. Every NCA FS header, all six IVFC levels and each BFTTF header are verified

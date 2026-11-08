@@ -1,4 +1,4 @@
-# NX2navi on RX 9070: findings (session started 2026-11-08T06:46Z; stamps from date -u)
+# Ocarina of Lain on RX 9070: findings (session started 2026-11-08T06:46Z; stamps from date -u)
 
 ## RGP: unusable on this driver and game (Observed, 4 of 4 runs)
 Tool: Radeon Developer Tool Suite 2026-10-02-1872 (RGP 2.7.1), RadeonDeveloperPanelCLI, driver 26.10.1.
@@ -254,3 +254,20 @@ Next: flash-k0 (clamp off) and flash-k1 (on), longer so dumps finish, flash-d1. 
 ## INSTALLED 2026-11-08T21:50Z (owner's go-ahead)
 game\ocarina.exe = src 4eb28d7 (d8ba170's fixes + fetch clamp), SHA256 AAB63318...9AF7, matches the build. Backup of the previous exe: game\ocarina.exe.bak-d8ba170. Ini untouched, submit_finish = 0x1. Rollback: copy that backup over ocarina.exe.
 Installed before the flash control finished, on the owner's word. Still to check on the installed copy: flash-k0/k1/d1, true fullscreen, 10-minute soak, Deku A/B. Owner's own fullscreen play is finish line E.
+
+## STATE at 2026-11-08T22:16Z (read this first)
+INSTALLED: game\ocarina.exe = src 654f63c runtime (fetch clamp, name Ocarina of Lain, icon, settings line "Ocarina of Lain 1.0"). SHA256 C32479D4...B88E. Backups: ocarina.exe.bak-4eb28d7, .bak-d8ba170, .bak-0.5.0-original. Ini untouched, submit_finish 0x1.
+REPO: github.com/jabroni1kanobi/Ocarina-of-Lain, PRIVATE (owner's choice), branch main = 654f63c, remote name lain. check_content passes. Push only with the owner's say.
+Flash (flash-batch2): clamp off 7 runs, clamp on 7 runs, same places (title screen grass 1229-1669; camera swing near 6051-6115), 1% of pixels, 0 faults: not from the clamp. Deku 10831-12430: 0 runs in 1,600 frames.
+Smoke of the final exe: Kokiri load to frame 3720, 0 faults. The settings line itself was not seen on screen by me: owner to confirm. Window title confirmed by the process.
+OPEN, in order:
+1. Ghosting on leaves and parts of Link (owner sighting, 2026-11-08), black leaves. Ideas: NX2NAVI_MESH_INVARIANT=1 (built, untested); motion vectors or FSR on those draws; falling leaves draw through fs 1aba + vs cfe721e/8946e1d into H1 at half resolution, composited in pass 197.
+2. Owner's fullscreen confirmation through the launcher (finish line E) and black side bars in true fullscreen: not checked by me.
+3. 10-minute soak on this build, voices (finish line D): not run on it.
+4. Deku A/B not re-run since the clamp. Kokiri about 18 ms, CPU replay 13.5 ms: line B not met. Leads: runtime at AVX2, compute write extent (upstream-leads.md #1).
+5. Redo float mask runs (box-fb5, fb9, fb3): the mask was broken before 4eb28d7, so VS, FS and CS were never tested alone. Hookshot 2.0.4 diff not read (shark-vs-hs202/hs204.diff).
+
+## Rename 2026-11-08T22:19Z (owner's order: remove the old name everywhere, builder too)
+Repo: display text = Ocarina of Lain, file and folder names = OcarinaOfLain (no spaces: build tools live under these paths), updater feed = this repo. chrg6's original README removed from the tree (old history keeps it). LICENSE and LICENSE-ADDITIONS untouched. Kept, because compiled game objects and the owner's data depend on them or they need a full rebuild from the kit: lowercase nx2navi file names (nx2navi.ini, nx2navi.log, nx2navi.rc), NX2NAVI_ settings prefix, C symbols. Git history keeps old text.
+Owner's installed launcher (app/0.5.0/launcher): display text only + feed; folder and OcarinaOfLain.exe keep their names, shortcuts and tools depend on them. Original: app/0.5.0/launcher.bak-original.
+Banner: assets/ocarina-of-lain.jpeg at the top of the README.

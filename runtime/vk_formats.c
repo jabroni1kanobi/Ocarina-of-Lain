@@ -25,7 +25,7 @@ typedef struct { VkFormat vk; uint8_t flags; const char *note; uint8_t chan[4]; 
 // (A2B10G10R10): RGB565 holds R in bits 0-4, RGB5A1 R in bits 0-4 and A in bit 15. Vulkan names them from the most
 // significant bit, so RGB565 is B5G6R5. RGB5A1's counterpart A1B5G5R5 needs VK_KHR_maintenance5, so it stands in as
 // A1R5G5B5 with R and B swapped by the view swizzle: sampling is right, rendering into it would store R and B swapped
-// (no NX2navi pass does). The terrain's normal (RGB5A1) and blend (RGB565) maps read with the old order stretched the
+// (no Ocarina of Lain pass does). The terrain's normal (RGB5A1) and blend (RGB565) maps read with the old order stretched the
 // ground textures along one axis.
 enum { CR = NVN_TEXTURE_SWIZZLE_R, CG = NVN_TEXTURE_SWIZZLE_G, CB = NVN_TEXTURE_SWIZZLE_B, CA = NVN_TEXTURE_SWIZZLE_A };
 #define P(nvn, vkf, fl, c0, c1, c2, c3, altf, a0, a1, a2, a3) \

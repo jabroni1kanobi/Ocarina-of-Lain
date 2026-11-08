@@ -1,7 +1,7 @@
 // The software keyboard's front end for SDL windows (swkbd.h). Until the in-game text field exists (an ImGui entry in
 // the menu overlay, which SDL_StartTextInput can pair with the Steam Deck's on-screen keyboard), the text entry takes
 // the starting text at once, as NX2NAVI_SWKBD_ANSWER=<initial> does: the game's initial text, else the default name from
-// the catalog. NX2navi asks only for a horse's name. NX2NAVI_SWKBD_TEST=cancel stands for Cancel pressed, as in the Win32
+// the catalog. Ocarina of Lain asks only for a horse's name. NX2NAVI_SWKBD_TEST=cancel stands for Cancel pressed, as in the Win32
 // window.
 #include <string.h>
 

@@ -487,7 +487,7 @@ class App:
 
     def after_update_notice(self):
         if self.args.rolled_back:
-            self.message = (f'Version {self.args.rolled_back} did not start, so NX2navi went back to '
+            self.message = (f'Version {self.args.rolled_back} did not start, so Ocarina of Lain went back to '
                             f'{versions.display(self.layout.version)}.')
 
     def show(self, screen, focus=None):
@@ -558,9 +558,9 @@ class App:
             Row('value', 'Install Folder', gd, big=True, on=self.choose_folder, desc=folder_desc),
             Row('divider'),
             self.toggle('Desktop Shortcut', 'desktop_shortcut',
-                        'Put an NX2navi shortcut on the desktop. The Start menu always has one.'),
+                        'Put an Ocarina of Lain shortcut on the desktop. The Start menu always has one.'),
             self.toggle('Check for Updates at Start', 'auto_check',
-                        'Look for a new version of NX2navi each time the launcher opens. Nothing is installed '
+                        'Look for a new version of Ocarina of Lain each time the launcher opens. Nothing is installed '
                         'until you choose Update.'),
             self.channel_row(),
             Row('divider'),
@@ -609,7 +609,7 @@ class App:
             return
         p = Path(path)
         if p.exists() and any(p.iterdir()) and not (p / 'build-cache').is_dir() and p.name.lower() != 'nx2navi':
-            p = p / 'NX2navi'
+            p = p / 'OcarinaOfLain'
         self.settings['game_dir'] = str(p)
         self.settings.save()
         self.show(self.screen, self.focus)
@@ -644,7 +644,7 @@ class App:
                       on=self.start_update, focus_value=True, desc=self.update_desc)
         elif self.check and self.check.result is None:
             upd = Row('value', 'Updates', 'Checking…', 'dim', big=True, icon='refresh', on=lambda: None,
-                      desc=('Looking for a new version of NX2navi.',))
+                      desc=('Looking for a new version of Ocarina of Lain.',))
         elif self.check_error:
             upd = Row('value', 'Updates', 'Could not check', 'dim', big=True, icon='refresh',
                       on=lambda: self.check_now(force=True),
@@ -657,7 +657,7 @@ class App:
         else:
             upd = Row('value', 'Updates', f'Version {mine}', 'normal', big=True, icon='refresh',
                       on=lambda: self.check_now(force=True),
-                      desc=(f'You have NX2navi {mine}. Select this row to look for a new version.',))
+                      desc=(f'You have Ocarina of Lain {mine}. Select this row to look for a new version.',))
         rebuild_value = f'Built with {versions.display(built)}' if built else 'Not built'
         rebuild_style = 'normal' if versions.display(built) == mine else 'salmon'
         play_desc = ('Start Ocarina of Time. The launcher steps aside while you play and comes back when you quit.',)
@@ -689,7 +689,7 @@ class App:
                 ready = saves.waiting(gd)[0] is not None
             except OSError:
                 pass
-        desc = ('Bring in a save from a Switch save backup, an emulator or another NX2navi install. Put it into the '
+        desc = ('Bring in a save from a Switch save backup, an emulator or another Ocarina of Lain install. Put it into the '
                 'saves folder of the game folder and select this row, or select this row and choose its folder.',
                 'Your current save is copied to the saves folder first.')
         if self.save_message:
@@ -822,7 +822,7 @@ class App:
         dump = self.settings.get('dump')
         return [
             self.toggle('Check for Updates at Start', 'auto_check',
-                        'Look for a new version of NX2navi each time the launcher opens. Nothing is installed '
+                        'Look for a new version of Ocarina of Lain each time the launcher opens. Nothing is installed '
                         'until you choose Update.'),
             self.toggle('Hide Launcher While Playing', 'hide_while_playing',
                         'Hide this window while the game runs; it comes back when you quit the game.'),
@@ -841,7 +841,7 @@ class App:
             Row('value', 'Open Logs Folder', '', 'arrow', on=lambda: self.open(self.layout.logs),
                 desc=('The launcher\'s logs. Attach launcher.log when you report a problem with installing or '
                       'updating; never send game files.',)),
-            Row('value', 'Uninstall NX2navi', 'Keeps your saves', 'salmon', on=lambda: self.show('uninstall'),
+            Row('value', 'Uninstall Ocarina of Lain', 'Keeps your saves', 'salmon', on=lambda: self.show('uninstall'),
                 desc=('Remove the launcher and its build tools. You choose on the next screen whether the built '
                       'game goes too.',)),
             Row('action', 'Back', on=lambda: self.show('home'), height=40, desc=('Back to the main menu.',)),
@@ -859,7 +859,7 @@ class App:
                       'Off: the game folder and your saves stay where they are.')),
             Row('divider'),
             Row('pair', actions=[('Uninstall', self.do_uninstall), ('Cancel', lambda: self.show('settings'))],
-                desc=('Uninstall removes NX2navi, its build tools and its shortcuts. Your dump is never touched.',)),
+                desc=('Uninstall removes Ocarina of Lain, its build tools and its shortcuts. Your dump is never touched.',)),
         ]
 
     def do_uninstall(self):
@@ -974,7 +974,7 @@ class App:
 
     def copy_report(self):
         j = self.job
-        report = [f'NX2navi {self.layout.version} ({"checkout" if self.layout.dev else "release"}), {sys.platform}',
+        report = [f'Ocarina of Lain {self.layout.version} ({"checkout" if self.layout.dev else "release"}), {sys.platform}',
                   f'Job: {j.kind}, step: {j.current().label}', f'Error: {j.error}', '', 'Last lines:']
         report += [ln for ln in list(j.lines)[-60:]]
         self.root.clipboard_clear()
@@ -1000,7 +1000,7 @@ class App:
                 if winsys.restart(self.layout, ['--continue-update', versions.display(self.layout.version)]):
                     self.root.after(200, self.root.destroy)
                     return
-                self.message = 'The update is ready: start NX2navi again to finish it.'
+                self.message = 'The update is ready: start Ocarina of Lain again to finish it.'
             elif j.after == 'staged':
                 self.message = 'The update was downloaded; a checkout keeps running from the repository.'
             if not self.settings.get('keep_cache') and j.kind in ('install', 'update', 'rebuild'):
@@ -1009,7 +1009,7 @@ class App:
                 self.message = 'The game is built. Select Play.'
             elif j.kind in ('update', 'rebuild'):
                 self.message = 'The game is rebuilt and up to date.' if j.kind == 'rebuild' else \
-                    f'NX2navi is now {versions.display(self.layout.version)}.'
+                    f'Ocarina of Lain is now {versions.display(self.layout.version)}.'
                 self.release = None
             self.reload_fonts_if_new()
             self.show(self.job_return)
@@ -1358,7 +1358,7 @@ class App:
 
 
 def parse_args(argv):
-    ap = argparse.ArgumentParser(prog='NX2navi')
+    ap = argparse.ArgumentParser(prog='Ocarina of Lain')
     ap.add_argument('--from', dest='source', help='a folder to look in for the dump first (the setup\'s folder)')
     ap.add_argument('--continue-update', metavar='OLD', help='finish an update after the restart (from OLD)')
     ap.add_argument('--rolled-back', metavar='VERSION', help='the stub went back from VERSION')
@@ -1407,7 +1407,7 @@ def main(argv=None):
         if lock is None:
             ctx.log('another launcher is running')
             return 0
-    root = tk.Tk(className='NX2navi')
+    root = tk.Tk(className='Ocarina of Lain')
     app = App(root, ctx, a)
     if a.selftest:
         from .selftest import run

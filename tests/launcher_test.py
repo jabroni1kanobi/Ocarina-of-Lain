@@ -448,7 +448,7 @@ def make_app_zip(folder, ver, extra=None):
     (app / 'launcher').mkdir(parents=True)
     (app / 'launcher' / 'start.pyw').write_text('# test\n')
     (app / 'VERSION').write_text(ver + '\n')
-    z = folder / f'NX2navi-app-{ver}.zip'
+    z = folder / f'OcarinaOfLain-app-{ver}.zip'
     with zipfile.ZipFile(z, 'w') as zf:
         for p in app.rglob('*'):
             if p.is_file():

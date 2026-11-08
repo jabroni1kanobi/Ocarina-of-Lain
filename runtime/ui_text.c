@@ -354,7 +354,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_MENU_LANG] = "Menu language", [UI_MENU_MENU_LANG_DESC] = "Language of this menu and the overlay.",
     [UI_MENU_MENU_LANG_AUTO] = "Automatic (from Windows)",
     [UI_MENU_DISCORD_RPC] = "Discord Rich Presence",
-    [UI_MENU_DISCORD_RPC_DESC] = "Shows \"Playing NX2navi\" with the play time in your Discord status while the "
+    [UI_MENU_DISCORD_RPC_DESC] = "Shows \"Playing Ocarina of Lain\" with the play time in your Discord status while the "
                                  "game runs. discord_app_id and discord_image in nx2navi.ini choose the application.",
 
     [UI_MENU_ADV_WARNING] = "These settings are for testing and troubleshooting. Change them only when you know why.",
@@ -1176,7 +1176,7 @@ static const char *const text_pt_br[UI_TEXT_COUNT] = {
     [UI_MENU_MENU_LANG] = "Idioma do menu", [UI_MENU_MENU_LANG_DESC] = "Idioma deste menu e do indicador.",
     [UI_MENU_MENU_LANG_AUTO] = "Automático (do Windows)",
     [UI_MENU_DISCORD_RPC] = "Discord Rich Presence",
-    [UI_MENU_DISCORD_RPC_DESC] = "Mostra \"Jogando NX2navi\" com o tempo de jogo no seu status do Discord "
+    [UI_MENU_DISCORD_RPC_DESC] = "Mostra \"Jogando Ocarina of Lain\" com o tempo de jogo no seu status do Discord "
                                  "enquanto o jogo roda. discord_app_id e discord_image no nx2navi.ini escolhem a "
                                  "aplicação.",
 

@@ -7,8 +7,8 @@ from pathlib import Path
 
 ROOT = Path(r'C:\Users\Johnn\Games\nx2navi-src')
 RT = ROOT / 'src' / 'runtime'
-CACHE = Path(r'C:\Users\Johnn\AppData\Local\Programs\NX2navi\game\build-cache')
-MSYS = Path(r'C:\Users\Johnn\AppData\Local\Programs\NX2navi\toolchain\msys64\ucrt64')
+CACHE = Path(r'C:\Users\Johnn\AppData\Local\Programs\Ocarina of Lain\game\build-cache')
+MSYS = Path(r'C:\Users\Johnn\AppData\Local\Programs\Ocarina of Lain\toolchain\msys64\ucrt64')
 ENV = dict(os.environ, PATH=str(MSYS / 'bin') + os.pathsep + os.environ.get('PATH', ''))
 lift = CACHE / 'lift'
 INC = ['-I', str(RT), '-I', str(lift), '-I', str(CACHE / 'gen'), '-I', str(RT / 'third_party' / 'imgui'), '-I', str(MSYS / 'include' / 'vma')]

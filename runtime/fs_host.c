@@ -89,7 +89,7 @@ static char *join(const char *dir, const char *name) {
 }
 
 // Save in progress: a save-data file open for writing, or save data changed in the last 3 s and not committed yet
-// (NX2navi writes a slot's files back to back and then commits; between the files nothing is open for a moment).
+// (Ocarina of Lain writes a slot's files back to back and then commits; between the files nothing is open for a moment).
 static volatile int32_t save_writers, save_dirty;
 static volatile int64_t save_changed_ns;
 static void save_wait_commit(void);

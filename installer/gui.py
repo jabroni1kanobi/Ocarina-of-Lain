@@ -543,14 +543,14 @@ class App:
 
 # ---- self test ---------------------------------------------------------------------------------------------------
 
-SAMPLE_START = {'type': 'start', 'release': 'selftest', 'mode': 'install', 'dest': 'Z:/selftest/NX2navi', 'log': 'D:\\log.txt',
+SAMPLE_START = {'type': 'start', 'release': 'selftest', 'mode': 'install', 'dest': 'Z:/selftest/OcarinaOfLain', 'log': 'D:\\log.txt',
                 'steps': ['check', 'fonts', 'extract', 'lift', 'compile', 'prepare', 'dlss', 'cleanup']}
 SAMPLE_RUN = [
     SAMPLE_START,
     {'type': 'plan', 'run': ['check', 'fonts', 'extract'], 'skip': {}},
     {'type': 'step', 'step': 'check', 'state': 'started'},
     {'type': 'progress', 'step': 'check', 'phase': 'inputs'},
-    {'type': 'space', 'dest': 'Z:/selftest/NX2navi', 'need': 36_400_000_000, 'free': 210_000_000_000, 'temp': 'C:\\t',
+    {'type': 'space', 'dest': 'Z:/selftest/OcarinaOfLain', 'need': 36_400_000_000, 'free': 210_000_000_000, 'temp': 'C:\\t',
      'temp_need': 0, 'temp_free': 0, 'same_disk': True},
     {'type': 'warning', 'id': 'warn.lang_needs_fonts', 'params': {'lang': 'ko'}},
     {'type': 'step', 'step': 'check', 'state': 'done', 'seconds': 12.0},
@@ -603,7 +603,7 @@ def selftest(layout, shots=None):
             app.ui_var.set(lang)
             app.switch_language()
             tag = lang
-            app.vars['dest'].set('Z:/selftest/NX2navi')
+            app.vars['dest'].set('Z:/selftest/OcarinaOfLain')
             app.vars['base'].set('Z:/selftest/nx2navi.xci')
             app.vars['update'].set('Z:/selftest/nx2navi-1.2.1.nsp')
             app.vars['keys'].set('Z:/selftest/prod.keys')
@@ -631,14 +631,14 @@ def selftest(layout, shots=None):
             app.model = Model()
             for e in SAMPLE_OK:
                 app.model.apply(e)
-            app.model.dest = 'Z:/selftest/NX2navi'
+            app.model.dest = 'Z:/selftest/OcarinaOfLain'
             app.model.finish(0)
             app.refresh_finish()
             app.show('finish')
             shot(f'finish-ok-{tag}')
             app.model = Model()
             for e in SAMPLE_RUN[:3] + [{'type': 'error', 'id': 'check.disk_space', 'step': 'check',
-                                        'params': {'path': 'Z:/selftest/NX2navi', 'need_gb': 36.4, 'free_gb': 20.1}},
+                                        'params': {'path': 'Z:/selftest/OcarinaOfLain', 'need_gb': 36.4, 'free_gb': 20.1}},
                                        {'type': 'end', 'result': 'failed', 'seconds': 3}]:
                 app.model.apply(e)
             app.model.finish(1)

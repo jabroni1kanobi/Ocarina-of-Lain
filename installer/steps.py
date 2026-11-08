@@ -254,7 +254,7 @@ def size_of(paths):
     return sum(p.stat().st_size for p in paths if p.is_file())
 
 
-# The Switch system shared fonts (runtime/ov_system.c): NX2navi falls back to them for Chinese, Korean and Traditional
+# The Switch system shared fonts (runtime/ov_system.c): Ocarina of Lain falls back to them for Chinese, Korean and Traditional
 # Chinese text. tools/vendor/macnativegames/extract_shared_fonts.py writes these names.
 SHARED_FONTS = 'shared-fonts'
 SHARED_FONT_FILES = ('0-standard.bfttf', '1-chinese-simplified.bfttf', '2-chinese-simplified-extension.bfttf',

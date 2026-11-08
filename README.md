@@ -1,10 +1,14 @@
+<p align="center">
+  <img src="assets/ocarina-of-lain.jpeg" alt="Ocarina of Lain" width="420">
+</p>
+
 # Ocarina of Lain
 
-A build of **NX2navi by chrg6**, the native PC recompilation of Ocarina of Time for Switch 2, with fixes for AMD graphics cards.
+A native PC recompilation of Ocarina of Time for Switch 2, with fixes for AMD graphics cards.
 
-**All credit for the port goes to chrg6.** This repo is chrg6's source plus the changes listed below, and it is not the official NX2navi. Please take problems with this build here, not to chrg6. chrg6's original README is at [docs/NX2navi-README.md](docs/NX2navi-README.md), and chrg6's `LICENSE` and `LICENSE-ADDITIONS` files apply and are unchanged.
+**Built on the port by chrg6, who gets all the credit for it.** This repo is chrg6's source plus the changes listed below, and it is not chrg6's official release. Please bring problems with this build here, not to chrg6. chrg6's `LICENSE` and `LICENSE-ADDITIONS` files apply and are unchanged.
 
-chrg6's permission for this repo: *"You have full permissions to provide the code under your own GitHub repo, but you must name it something else. Reference work taken from me, but do not advertise your build as NX2Native."*
+chrg6 gave permission for this repo: *"You have full permissions to provide the code under your own GitHub repo, but you must name it something else. Reference work taken from me."*
 
 No game files are in this repo. You need your own copy of the game.
 
@@ -39,21 +43,21 @@ The flash meter found no flashes in 1,600 frames of the Deku Tree scene. In Koki
 
 ## Build it
 
-You need Windows, about 60 GB free, and your own game. The scripts relink the runtime against a working NX2navi install, so the install does the heavy work.
+You need Windows, about 60 GB free, and your own game. The scripts relink the runtime against that working install, so the install does the heavy work.
 
-1. Install **NX2navi 0.5.0** with chrg6's launcher and let it build the game from your own files. Run it once.
+1. Install chrg6's original port, version 0.5.0, with its launcher, and let it build the game from your own files. Run it once.
 2. Install Python 3.12 or newer. Clone this repo into a folder named `src` (for example `C:\Users\you\Games\nx2navi-src\src`).
 3. Copy `tools/lain/build_rt.py` and `tools/lain/build_guest.py` up one level, next to `src`. Edit the paths at the top of both to match your PC: `ROOT`, `GAME`, `CACHE`, `MSYS`. They currently hold the paths from the PC this was built on.
 4. Optional, faster on CPUs with AVX2: `python build_guest.py`. It writes `guest-x86-64-v3-O1`, and step 5 links it with `--guest`.
 5. Build: `python build_rt.py --setup --guest guest-x86-64-v3-O1 --out exe-ms.exe`. Leave out `--guest ...` if you skipped step 4. The result is `out\exe-ms.exe`.
-6. Install: in the NX2navi `game` folder, back up `ocarina.exe`, then copy `exe-ms.exe` over it, keeping the name `ocarina.exe` so the launcher still starts it.
+6. Install: in the install's `game` folder, back up `ocarina.exe`, then copy `exe-ms.exe` over it, keeping the name `ocarina.exe` so the launcher still starts it.
 7. In `nx2navi.ini`, under `[performance]`, set `submit_finish = 0x1`.
 
 A launcher update overwrites the exe: repeat step 6 afterwards.
 
 ## Switches
 
-Set as environment variables:
+Set as environment variables. These internal names still use the original project's prefix:
 
 - `NX2NAVI_FETCH_CLAMP=0` turns the box fix off.
 - `NX2NAVI_FLOAT_BITS` is a mask: 1 mesh and task (default), 2 vertex, 4 fragment, 8 compute. All stages at once gave a burst of noise in an older test.

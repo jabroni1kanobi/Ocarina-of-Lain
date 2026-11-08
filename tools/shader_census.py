@@ -1,4 +1,4 @@
-"""Census of every Maxwell shader in the extracted NX2navi RomFS and ExeFS, and an offline translation pass.
+"""Census of every Maxwell shader in the extracted Ocarina of Lain RomFS and ExeFS, and an offline translation pass.
 
 The inventory, the bnsh, sharcb and sarc readers and the package walk: Copyright (c) 2026 MacNativeGames contributors
 (MIT; see THIRD_PARTY_NOTICES.md). This pass reads no shared shader list, runs no spirv-cross and makes no bind-state

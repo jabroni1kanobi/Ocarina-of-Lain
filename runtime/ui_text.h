@@ -5,7 +5,7 @@
 typedef enum {
     // Software keyboard
     UI_SWKBD_TITLE,          // caption of the text-entry window
-    UI_SWKBD_PROMPT,         // prompt when the game gives no header, guide or sub text (NX2navi names a horse)
+    UI_SWKBD_PROMPT,         // prompt when the game gives no header, guide or sub text (Ocarina of Lain names a horse)
     UI_SWKBD_DEFAULT_NAME,   // text the entry starts with when the game gives none, so a controller can confirm it
     UI_SWKBD_OK,
     UI_SWKBD_CANCEL,
@@ -22,7 +22,7 @@ typedef enum {
     UI_MENU_AFTER_RESTART,    // note on a setting that is read at start
     UI_MENU_SET_BY_ENV,       // note on a setting an environment variable fixes
     UI_MENU_SAVE_FAILED,
-    UI_MENU_VERSION,          // "NX2navi %s, game %s": the port version and the game update, beside the title
+    UI_MENU_VERSION,          // "Ocarina of Lain %s, game %s": the port version and the game update, beside the title
 
     // Screen
     UI_MENU_FULLSCREEN, UI_MENU_FULLSCREEN_DESC,

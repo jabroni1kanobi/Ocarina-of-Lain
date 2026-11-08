@@ -532,7 +532,7 @@ static void test_pad_make(void) {
     d.type = SDL_JOYSTICK_TYPE_GAMEPAD;
     d.naxes = SDL_GAMEPAD_AXIS_COUNT;
     d.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
-    d.name = "NX2navi test gamepad";
+    d.name = "Ocarina of Lain test gamepad";
     SDL_JoystickID id = SDL_AttachVirtualJoystick(&d);
     test_joy = id ? SDL_OpenJoystick(id) : NULL;
     if (!test_joy) {

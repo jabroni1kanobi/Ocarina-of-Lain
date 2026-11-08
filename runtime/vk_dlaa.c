@@ -203,12 +203,12 @@ static int vtable_ok(void) {
     unsigned u = 0;
     float f = 0;
     void *v = NULL;
-    p_seti(p, "NX2navi.Test.I", -12345);
-    p_setu(p, "NX2navi.Test.U", 4000000000u);
-    p_setf(p, "NX2navi.Test.F", 1.25f);
-    p_setp(p, "NX2navi.Test.P", (void *)p);
-    int ok = p_geti(p, "NX2navi.Test.I", &i) && i == -12345 && p_getu(p, "NX2navi.Test.U", &u) && u == 4000000000u &&
-             p_getf(p, "NX2navi.Test.F", &f) && f == 1.25f && p_getp(p, "NX2navi.Test.P", &v) && v == (void *)p;
+    p_seti(p, "OcarinaOfLain.Test.I", -12345);
+    p_setu(p, "OcarinaOfLain.Test.U", 4000000000u);
+    p_setf(p, "OcarinaOfLain.Test.F", 1.25f);
+    p_setp(p, "OcarinaOfLain.Test.P", (void *)p);
+    int ok = p_geti(p, "OcarinaOfLain.Test.I", &i) && i == -12345 && p_getu(p, "OcarinaOfLain.Test.U", &u) && u == 4000000000u &&
+             p_getf(p, "OcarinaOfLain.Test.F", &f) && f == 1.25f && p_getp(p, "OcarinaOfLain.Test.P", &v) && v == (void *)p;
     if (N.destroy_params) N.destroy_params(p);
     if (!ok) rt_log("dlaa: NGX parameter layout check failed (i=%d u=%u f=%g p=%p): DLAA off", i, u, f, v);
     return ok;
@@ -281,7 +281,7 @@ void vk_dlaa_init(void) {
 
 int vk_dlaa_available(void) { return vk_dlaa_wanted() && N.available; }
 
-// ---------------------------------------------------------------- where DLAA runs in NX2navi's frame
+// ---------------------------------------------------------------- where DLAA runs in Ocarina of Lain's frame
 // Measured (NX2NAVI_DUMP, frame 2100 at Lookout Landing, 2560x1440 scene): the G-buffer passes draw into five targets with
 // the scene depth (d32f at the scene size), one of them the R11G11B10F light target; lighting and the transparents
 // then draw into that light target alone, the last time with the scene depth attached; the first pass narrower than a
@@ -447,7 +447,7 @@ static void free_size(struct Size *e) {
 
 // The entry for a scene and output size: its output (RGBA16F at the output size, written by DLSS, then blitted into
 // the target) and motion vectors (RG16F at the scene size, render pixels), both kept in GENERAL like every image of the
-// back end. NX2navi's dynamic resolution switches between a few sizes; each keeps its feature, the least recently used
+// back end. Ocarina of Lain's dynamic resolution switches between a few sizes; each keeps its feature, the least recently used
 // goes for a new one.
 static struct Size *size_for(VkCommandBuffer cb, uint32_t w, uint32_t h, uint32_t ow, uint32_t oh) {
     struct Size *e = NULL, *lru = &D.sizes[0];
@@ -646,7 +646,7 @@ fail:
 }
 
 // The reprojection from this frame's clip space to last frame's, last * inverse(this), in double precision: the shader
-// took each pixel back to world space through a float inverse of the view-projection, and with NX2navi's world
+// took each pixel back to world space through a float inverse of the view-projection, and with Ocarina of Lain's world
 // coordinates in the thousands and its far plane the result was noise of a fraction of a pixel and more on distant
 // surfaces, which DLSS followed into a shimmer like heat haze (roofs and trees, most of all in the upscaling modes).
 // The shader is unchanged: its "this frame" block gets the identity and its "last frame" block this matrix, so it
@@ -1494,7 +1494,7 @@ void vk_dlaa_frame(void) {
 }
 
 // ---------------------------------------------------------------- the game's FXAA (NX2NAVI_FXAA, live)
-// NX2navi's FXAA is two full-screen passes after the bloom, just before the HUD: one copies the scene target into a
+// Ocarina of Lain's FXAA is two full-screen passes after the bloom, just before the HUD: one copies the scene target into a
 // scratch target, the other draws the anti-aliased result back over the scene (found by diffing frame dumps with the
 // game's own switch, ModelSceneExtensionParam EnableFXAA, on and off). With fxaa = 0 the draws of that second pass's
 // fragment shader are skipped, so the scene reaches the HUD as it was. Shaders are known by the FNV-1a hash of their

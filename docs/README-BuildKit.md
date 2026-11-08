@@ -1,10 +1,10 @@
-# NX2navi build kit
+# Ocarina of Lain build kit
 
 This kit builds *The Legend of Zelda: Ocarina of Time* (Nintendo Switch 2, game version 1.1.1) as a native Windows
 program **on your PC, from your own copy of the game**. The kit contains no game code or data. Everything the build
 writes (`ocarina.exe`, the RomFS image, the shader cache, your saves) comes from your game: keep it to yourself.
 
-The NX2navi launcher (`NX2navi-Setup.exe`, [launcher.md](launcher.md)) does everything below for you, the
+The Ocarina of Lain launcher (`OcarinaOfLain-Setup.exe`, [launcher.md](launcher.md)) does everything below for you, the
 downloads included, and keeps the game up to date. This page is the same build by hand.
 
 ## What you need

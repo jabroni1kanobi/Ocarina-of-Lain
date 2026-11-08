@@ -1,4 +1,4 @@
-// The mouse pointer in NX2navi 1.4.3's own menus (the title, the inventory, the System tab, Options, shops, dialogue
+// The mouse pointer in Ocarina of Lain 1.4.3's own menus (the title, the inventory, the System tab, Options, shops, dialogue
 // choices): while a menu screen has the game's focus box (eui's BoxCursor, the frame the d-pad moves), the Windows
 // pointer is released from the mouse camera and shown, the item under it takes the focus as if the d-pad had moved
 // there (highlight, sound and description included), a left click on an item is A on it and a right click is B.
@@ -189,7 +189,7 @@ static uint64_t root_pane(uint64_t btn) {
     uint64_t blyt = rd64(btn + BTN_LAYOUT);
     return ok_at(blyt, LYT_ROOT + 8) ? rd64(blyt + LYT_ROOT) : 0;
 }
-// Every usable node's shown hit pane lies off the visible layout: the hit panes are stale (NX2navi never uses touch;
+// Every usable node's shown hit pane lies off the visible layout: the hit panes are stale (Ocarina of Lain never uses touch;
 // the dialogue choices' sit far from where the choices are drawn), so the buttons' own parts panes stand for them
 static int stale_hit_panes(int n, const uint64_t *btn, float lw, float lh, const Xf *t) {
     int seen = 0;

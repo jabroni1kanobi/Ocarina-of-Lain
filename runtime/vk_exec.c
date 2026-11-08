@@ -361,7 +361,7 @@ static void resolve_target(const tex_t *t, const view_t *v, int has_v, int depth
 }
 
 /* The size of a pass without attachments: the far corner of viewport 0, else of the scissor, 1..16384.
-   NX2navi draws a fragment shader that only writes a storage buffer into a 1x1
+   Ocarina of Lain draws a fragment shader that only writes a storage buffer into a 1x1
    viewport; a pass sized by the viewport's width alone puts an offset viewport outside the scissor, and the cave rock
    loses its ambient light. */
 void vk_exec_noatt_dims(const VkExec *ex, uint32_t *w, uint32_t *h) {

@@ -1,4 +1,4 @@
-// Direct mouse input for NX2navi 1.4.3. The camera controller's input update (main+0x874c1c) turns HID stick floats
+// Direct mouse input for Ocarina of Lain 1.4.3. The camera controller's input update (main+0x874c1c) turns HID stick floats
 // into a radial dead zone, clamps the radius to one and applies StickExponent. The mouse enters after all three,
 // at main+0x874cb4, before the game's X/Y inversion and input-activity flags. It never becomes a HID stick value.
 // Free orbit removes that sample again before the camera's additional vertical square/velocity filters and adds

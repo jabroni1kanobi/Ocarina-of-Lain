@@ -1,8 +1,8 @@
 """Assemble the Linux release folder of docs/installer.md ("Linux release") and pack it as an AppImage.
 
-    .venv/bin/python tools/make_release_linux.py --out build/release/NX2navi-Setup-linux \\
-        [--appimage build/release/NX2navi-Setup-x86_64.AppImage]
-    .venv/bin/python tools/make_release_linux.py --out build/release/NX2navi-Setup-linux --prove
+    .venv/bin/python tools/make_release_linux.py --out build/release/OcarinaOfLain-Setup-linux \\
+        [--appimage build/release/OcarinaOfLain-Setup-x86_64.AppImage]
+    .venv/bin/python tools/make_release_linux.py --out build/release/OcarinaOfLain-Setup-linux --prove
 
 The same model as the Windows release (tools/make_release.py, whose download cache, unpacking and checks this reuses): the
 folder carries the setup and a toolchain, never game code; the player's machine builds the game. Everything that runs on
@@ -433,7 +433,7 @@ exec "$HERE/python/bin/python3" -m installer.gui "$@"
 
 DESKTOP = '''[Desktop Entry]
 Type=Application
-Name=NX2navi Setup
+Name=Ocarina of Lain Setup
 Comment=Builds Ocarina of Time for this PC from your own game files
 Exec=AppRun
 Icon=nx2navi-setup

@@ -1322,7 +1322,7 @@ static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *
 }
 
 // ---- feedback loops (maxwell.md 1.9, vk.h VkCtx.feedback)
-// NX2navi's G-buffer and terrain shaders sample targets of the pass that renders them, at their own pixel, after earlier
+// Ocarina of Lain's G-buffer and terrain shaders sample targets of the pass that renders them, at their own pixel, after earlier
 // draws of the pass wrote them (albedo, normals, R32F linear depth). Maxwell reads see those writes; in Vulkan the read
 // is undefined without a barrier, and on the RX 9070 it showed as dark screen-aligned blocks on the island ground
 // and hid Tulin's sage spirit. Before a draw whose fragment shader samples an attachment of
@@ -2011,7 +2011,7 @@ static void pool_sync_entries(VkExec *ex) {
 }
 
 // ---- depth twins: colour images under a compare sampler in a compute shader
-// NX2navi's compute passes sample an R32_SFLOAT texture through a shadow sampler. Maxwell compares any single-channel
+// Ocarina of Lain's compute passes sample an R32_SFLOAT texture through a shadow sampler. Maxwell compares any single-channel
 // float or unorm texel; Vulkan only formats with SAMPLED_IMAGE_DEPTH_COMPARISON (VUID-vkCmdDispatch-None-06479), which
 // AMD's drivers do not give R32_SFLOAT, so the result there is undefined. Such an image gets a depth twin of the same
 // size and bits (R32_SFLOAT -> D32_SFLOAT, R16_UNORM -> D16_UNORM), copied through a buffer right before each dispatch
@@ -3399,7 +3399,7 @@ static void mvobj_banks(VkExec *ex) {
 }
 
 // 1: old is cur a little changed or the same (every float within 10 %, at least 1.0 and at most 4.0); *changed: not
-// the same. The cap: NX2navi's world positions are in the thousands, and 10 % of them let another object's block a few
+// the same. The cap: Ocarina of Lain's world positions are in the thousands, and 10 % of them let another object's block a few
 // units away pass as this one moved; nothing moves 4 units in a frame.
 static int mo_similar(const uint8_t *cur, const uint8_t *old, uint64_t n, int *changed) {
     *changed = 0;

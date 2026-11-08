@@ -11,7 +11,7 @@
 #include "nvn_tex.h"
 
 // The CPU is about to read what the GPU wrote into pool storage: the back end writes its host-side copies (the Vulkan
-// back end's images) back first. NX2navi invalidates its 260x260 R16 grass maps and 1x1 pick targets this way. A
+// back end's images) back first. Ocarina of Lain invalidates its 260x260 R16 grass maps and 1x1 pick targets this way. A
 // CPU-invisible pool has no storage to read.
 void nvn_pool_invalidate(const pool_t *p, uint64_t off, uint64_t size) {
     if (!p->mem || nvn_gpu_only((uintptr_t)p->mem) || off >= p->size || !size) return;

@@ -417,7 +417,7 @@ uint32_t mem_map(uint64_t dst, uint64_t src, uint64_t n) { return stack_move(0, 
 uint32_t mem_unmap(uint64_t dst, uint64_t src, uint64_t n) { return stack_move(1, dst, src, n); }
 
 // ---- 0x2C/0x2D MapPhysicalMemory, UnmapPhysicalMemory. Horizon maps only the still-unmapped pages of the range and
-// leaves mapped pages and their contents alone; NX2navi's heaps grow by re-mapping ranges they partly own.
+// leaves mapped pages and their contents alone; Ocarina of Lain's heaps grow by re-mapping ranges they partly own.
 static void alias_runs(uint64_t first, uint64_t count, uint8_t want, int do_commit) {   // under lock
     uint64_t i = 0;
     while (i < count) {

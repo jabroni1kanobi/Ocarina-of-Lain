@@ -982,7 +982,7 @@ out:
 
 // Every gradient sample (OpImageSampleExplicitLod with Grad) whose two gradients are each built from two components gets
 // them transposed, dx = (a, c) and dy = (b, d) from dx = (a, b) and dy = (c, d), by two new OpCompositeConstruct before
-// it. NX2navi's shaders fill a TXD's gradient registers per coordinate (du/dx, du/dy, dv/dx, dv/dy), and the translator
+// it. Ocarina of Lain's shaders fill a TXD's gradient registers per coordinate (du/dx, du/dy, dv/dx, dv/dy), and the translator
 // builds dx = (first two registers), dy = (last two) = (du/dx, du/dy) and
 // (dv/dx, dv/dy): a mip level chosen from the wrong derivatives, too sharp on terrain faces turned across the screen,
 // which crawled in patches that followed the faces. NX2NAVI_TXD_TRANSPOSE=0 turns it off.

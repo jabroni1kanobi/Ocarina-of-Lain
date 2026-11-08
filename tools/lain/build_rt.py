@@ -13,9 +13,9 @@ RT = SRC / 'runtime'
 OBJ = ROOT / 'obj'
 RT_MARCH = []
 OUT = ROOT / 'out'
-GAME = Path(r'C:\Users\Johnn\AppData\Local\Programs\NX2navi\game')
+GAME = Path(r'C:\Users\Johnn\AppData\Local\Programs\Ocarina of Lain\game')
 CACHE = GAME / 'build-cache'
-MSYS = Path(r'C:\Users\Johnn\AppData\Local\Programs\NX2navi\toolchain\msys64\ucrt64')
+MSYS = Path(r'C:\Users\Johnn\AppData\Local\Programs\Ocarina of Lain\toolchain\msys64\ucrt64')
 LINK_LIBS = ['-lvulkan-1', '-lSDL3', '-lopus', '-lvpx', '-l:libdav1d.a', '-lzstd', '-l:libatomic.a', '-lbcrypt',
              '-limm32', '-luuid', '-lole32', '-luser32', '-lshell32', '-lgdi32', '-ladvapi32', '-lwinmm']
 ENV = dict(os.environ, PATH=str(MSYS / 'bin') + os.pathsep + os.environ.get('PATH', ''))

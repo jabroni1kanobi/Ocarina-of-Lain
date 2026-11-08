@@ -1,9 +1,9 @@
-// Discord Rich Presence: "Playing NX2navi" with the elapsed play time in the player's Discord status, through
+// Discord Rich Presence: "Playing Ocarina of Lain" with the elapsed play time in the player's Discord status, through
 // the local IPC of a running Discord client (platform.h's plat_ipc_*). Nothing leaves the machine but the activity
 // itself, and nothing is sent while NX2NAVI_DISCORD_RPC is off (the default: the status is information about the
 // player's session). NX2NAVI_DISCORD_APP_ID names the application whose name ("Playing <name>") and artwork Discord
 // shows, NX2NAVI_DISCORD_IMAGE the key of its uploaded art asset; both default to discord_app.h, the one place the
-// NX2navi application's id is written, and nx2navi.ini's discord_app_id and discord_image override them. With no
+// Ocarina of Lain application's id is written, and nx2navi.ini's discord_app_id and discord_image override them. With no
 // application id at all the thread stays idle and logs that once: there is nothing to show the status under.
 //
 // One host thread owns the connection and never holds a virtual core (kernel.c: host work runs without one). It
@@ -70,7 +70,7 @@ static void read_setting(const char *name, char *out, size_t cap, int (*valid)(c
 
 static void log_no_app_id(void) {
     rt_log("discord: no application id: set discord_app_id in nx2navi.ini, or NX2NAVI_DISCORD_APP_ID_DEFAULT in "
-           "runtime/discord_app.h, to the id of the Discord application named NX2navi");
+           "runtime/discord_app.h, to the id of the Discord application named Ocarina of Lain");
 }
 
 static void le32(uint8_t *at, uint32_t v) {

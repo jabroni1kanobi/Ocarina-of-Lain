@@ -169,7 +169,7 @@ def extract_base_romfs(out, keys, logs, base=None):
 
 def program_ncas(base, update, keys_path):
     """(tickets, [(source, record, header)] of the base and the update Program NCA). Raises ValueError for a file
-    that is no NX2navi base game or update, or keys that cannot open it."""
+    that is no Ocarina of Lain base game or update, or keys that cannot open it."""
     keys = load_keys(keys_path)
     tickets = {}
     inputs = []
@@ -305,7 +305,7 @@ def main():
         say('  extracting ExeFS')
         extract_exefs(base, keys, base_out, logs, update=False)
     problems = exefs_problems(base_out / 'exefs', v0)
-    require(not problems, f'Base game is not NX2navi 1.0.0: {", ".join(problems)} differ')
+    require(not problems, f'Base game is not Ocarina of Lain 1.0.0: {", ".join(problems)} differ')
     say('  ExeFS 1.0.0: main, sdk, subsdk0, rtld match')
     report_npdm(base_out / 'exefs', v0)
     if not romfs_verified(base_out / 'romfs', v0):

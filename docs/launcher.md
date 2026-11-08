@@ -1,17 +1,17 @@
 # Launcher
 
-NX2navi's launcher installs everything the build needs, builds the game from the player's own dump, starts it, and
-keeps the port up to date. Players download one file, `NX2navi-Setup-<version>.exe`; nothing of the game ships with
+Ocarina of Lain's launcher installs everything the build needs, builds the game from the player's own dump, starts it, and
+keeps the port up to date. Players download one file, `OcarinaOfLain-Setup-<version>.exe`; nothing of the game ships with
 it. The code is `launcher/`, the release is made by `tools/make_launcher.py`, and the build itself is
 `tools/make_game.py` (the build kit's script, [README-BuildKit.md](README-BuildKit.md)).
 
 ## What the player does
 
-1. Starts `NX2navi-Setup.exe` (from the folder that holds their `.nup` dump, ideally). It installs the launcher into
-   `%LOCALAPPDATA%\Programs\NX2navi` without administrator rights, adds Start menu and Desktop shortcuts and an entry
+1. Starts `OcarinaOfLain-Setup.exe` (from the folder that holds their `.nup` dump, ideally). It installs the launcher into
+   `%LOCALAPPDATA%\Programs\Ocarina of Lain` without administrator rights, adds Start menu and Desktop shortcuts and an entry
    in Settings > Apps, and opens the launcher. Windows SmartScreen warns once: the programs are not signed.
 2. The launcher finds the dump by itself in the setup's folder, Downloads, Desktop, Documents or the top of each
-   drive, and proposes `<launcher>\game` as the install folder (or `X:\Games\NX2navi` on the drive with the most
+   drive, and proposes `<launcher>\game` as the install folder (or `X:\Games\Ocarina of Lain` on the drive with the most
    free space when that drive has less than 40 GB). Both rows can be changed.
 3. Selects **Begin Installation**. The launcher downloads the build tools (about 170 MB, once), checks the dump,
    unpacks it, translates and compiles the game: 10 to 25 minutes. It keeps the PC awake meanwhile.
@@ -31,10 +31,10 @@ Display: the launcher decodes it from the player's dump or built game into `data
 `runtime/menu_assets.c` does for the in-game menu) and uses the system's interface font until then. Every picture is
 drawn in code (`launcher/ui/art.py`); no texture, font or sound of the game is in the repository or the release.
 
-Navi (`art.NAVI`, 22 x 21 pixels, drawn in whole pixels at every size) is also the icon of `NX2navi.exe`,
-`NX2navi-Setup.exe`, the window and its taskbar button (`art.navi_ico`, written into the release by
+Navi (`art.NAVI`, 22 x 21 pixels, drawn in whole pixels at every size) is also the icon of `OcarinaOfLain.exe`,
+`OcarinaOfLain-Setup.exe`, the window and its taskbar button (`art.navi_ico`, written into the release by
 `tools/make_launcher.py`). The window sets that icon on itself, and the setup's shortcuts carry the window's taskbar
-identity (`NX2navi.Launcher`), so the taskbar groups and pins it under NX2navi rather than Python.
+identity (`OcarinaOfLain.Launcher`), so the taskbar groups and pins it under Ocarina of Lain rather than Python.
 
 Screens (`launcher/ui/app.py`): first run (dump, install folder, Desktop Shortcut, Check for Updates at Start,
 Update Channel, Begin Installation); the steps of an install, update or rebuild with their progress, the build log's
@@ -50,7 +50,7 @@ for updates); an XInput gamepad (d-pad or left stick, A, B, Y).
 ## The launcher's folder
 
 ```
-NX2navi.exe              launcher/native/nx2navi.c: swaps in a staged Python, starts app\<current>\launcher\start.pyw
+OcarinaOfLain.exe              launcher/native/nx2navi.c: swaps in a staged Python, starts app\<current>\launcher\start.pyw
 python/                  python.org's embeddable Python 3.14.9 with tkinter, numpy, lz4, zstandard and truststore
 app/current.txt          the version the stub starts; app/previous.txt the one before it
 app/<version>/           launcher/, runtime/, recomp/, tools/, bin/nx2navi_xlate.exe, VERSION,
@@ -64,7 +64,7 @@ game/                    the built game, unless another folder was chosen (its l
 ```
 
 A path the Windows ANSI code page cannot hold breaks the MSYS2 tools, so the toolchain then goes to
-`C:\NX2navi\toolchain` instead (`launcher/paths.py`).
+`C:\Ocarina of Lain\toolchain` instead (`launcher/paths.py`).
 
 ## Installing
 
@@ -94,18 +94,18 @@ A path the Windows ANSI code page cannot hold breaks the MSYS2 tools, so the too
 
 ## Updating
 
-A release carries `NX2navi-update.json` (version, notes, and the size and sha256 of each file). The feed
+A release carries `OcarinaOfLain-update.json` (version, notes, and the size and sha256 of each file). The feed
 (`app/<version>/feed.json`) names a GitHub repository: the launcher reads its newest release (or pre-release, on the
 Preview channel) that has the manifest. A private repository answers only with a token (`github_token` in
 `data/launcher.json`); players need a public one. `feed_repo` in `data/launcher.json` points one launcher at another
-repository for testing; `{"type": "url", "url": ".../NX2navi-update.json"}` in feed.json reads one manifest
+repository for testing; `{"type": "url", "url": ".../OcarinaOfLain-update.json"}` in feed.json reads one manifest
 directly.
 
 `jobs.UpdateDownloadJob`, before the restart (`launcher/updater.py`):
 
-1. **Download** `NX2navi-app-<version>.zip` (about 3 MB plus the shader translator) to `data/downloads`, resuming a cut
+1. **Download** `OcarinaOfLain-app-<version>.zip` (about 3 MB plus the shader translator) to `data/downloads`, resuming a cut
    download, and check its size and sha256. When the manifest names a Python other than `python/runtime-id.txt`, also
-   `NX2navi-runtime-<id>.zip`, unpacked into `python.next`.
+   `OcarinaOfLain-runtime-<id>.zip`, unpacked into `python.next`.
 2. **Verify**: the archive unpacks into `app/<version>.part`, refusing names that leave the folder, holds the expected
    `VERSION` and a launcher, and becomes `app/<version>`.
 3. `app/previous.txt` gets the running version, `app/current.txt` the new one, and the launcher starts the stub with
@@ -142,7 +142,7 @@ Import Saves (home, under Game Folder; `launcher/saves.py`) makes another save t
 a `saves` folder with a README for it: a save put there (its files, or the folder that holds them) is taken first,
 and the row then reads "From the Saves Folder"; otherwise selecting the row asks for the folder. It recognises a
 Switch save backup (the save's files), an emulator's save folder (nested folders named by user and title ids), and
-another NX2navi game folder or its profile folder (the account folder inside). A folder with more than 4,000 files
+another Ocarina of Lain game folder or its profile folder (the account folder inside). A folder with more than 4,000 files
 or 1 GB is refused as picked by mistake.
 
 The game keeps its save in `profile/save/<account>`, named after `profile/account.uid` (made as the game would when
@@ -164,7 +164,7 @@ it), and what to check: the date, time and time zone, or security software that 
 
 ## Uninstalling
 
-Settings > Uninstall NX2navi, or Settings > Apps > NX2navi (which runs `NX2navi.exe --uninstall`): the launcher
+Settings > Uninstall Ocarina of Lain, or Settings > Apps > Ocarina of Lain (which runs `OcarinaOfLain.exe --uninstall`): the launcher
 folder, its toolchain, the shortcuts and the Apps entry go; the built game and its saves stay unless "Remove the
 Built Game" is On. The dump is never touched.
 
@@ -172,8 +172,8 @@ Built Game" is On. The dump is never touched.
 
 `launcher/cli.py` runs the same jobs without the window (`python -m launcher.cli`, or in an installed launcher
 `python\python.exe app\<version>\launcher\cli.py`): `check`, `update`, `tools`, `install --dump F --game D`,
-`rebuild [--game D]`, `fonts`. `NX2navi.exe --desktop-shortcut on|off` and `--shortcuts on|off` are the stub's own.
-`NX2navi-Setup.exe` takes `--dest DIR`, `--no-shortcuts`, `--no-launch` and `--quiet`.
+`rebuild [--game D]`, `fonts`. `OcarinaOfLain.exe --desktop-shortcut on|off` and `--shortcuts on|off` are the stub's own.
+`OcarinaOfLain-Setup.exe` takes `--dest DIR`, `--no-shortcuts`, `--no-launch` and `--quiet`.
 
 ## Releases
 
@@ -189,10 +189,10 @@ Built Game" is On. The dump is never touched.
    `--ffx` puts AMD's signed `amd_fidelityfx_vk.dll` (FidelityFX SDK 1.1.4) in the release for FSR 3.1.
 
    On Linux it cross-compiles the two programs with clang, lld and llvm-windres against the same MSYS2 packages and
-   unpacks Tcl/Tk with msiextract (msitools). It writes into `build/launcher-release`: `NX2navi-Setup-<version>.exe`
-   (the setup program with the launcher folder appended as a zip), `NX2navi-app-<version>.zip` (with the prebuilt
+   unpacks Tcl/Tk with msiextract (msitools). It writes into `build/launcher-release`: `OcarinaOfLain-Setup-<version>.exe`
+   (the setup program with the launcher folder appended as a zip), `OcarinaOfLain-app-<version>.zip` (with the prebuilt
    runtime),
-   `NX2navi-runtime-<id>.zip` and `NX2navi-update.json`. `check_content` runs over the folder first.
+   `OcarinaOfLain-runtime-<id>.zip` and `OcarinaOfLain-update.json`. `check_content` runs over the folder first.
 3. Upload those four files to GitHub release `v<version>` of the feed repository, by hand or with `--publish`
    (`gh release create`; add `--draft` to look before it goes out). Launchers see it at their next start.
 

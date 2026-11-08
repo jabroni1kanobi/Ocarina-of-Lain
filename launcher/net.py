@@ -162,7 +162,7 @@ def certificate_problem(url, refused, version='dev'):
     clock = (f"This PC's clock agrees with {host}'s." if theirs is not None else
              f"Check that this PC's date, time and time zone are right ({where}).")
     return (f'{text} {clock} Security software that scans encrypted connections (HTTPS or SSL scanning) or a proxy '
-            'may be replacing the certificate: let NX2navi through it or turn that scanning off, then try again.')
+            'may be replacing the certificate: let Ocarina of Lain through it or turn that scanning off, then try again.')
 
 
 def get_bytes(url, headers=None, timeout=30, version='dev', limit=64 << 20):

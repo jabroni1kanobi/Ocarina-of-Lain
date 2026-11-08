@@ -1,7 +1,7 @@
 # iid_of.py <translated spv sha prefix> ...: the input id whose translation is that .spv (the name NX2NAVI_SPV_IID wants)
 import hashlib, os, struct, sys
 from pathlib import Path
-GAME = Path(r'C:\Users\Johnn\AppData\Local\Programs\NX2navi\game')
+GAME = Path(r'C:\Users\Johnn\AppData\Local\Programs\Ocarina of Lain\game')
 base = bytes.fromhex((GAME / 'nx2navi_xlate.id').read_text().strip()[:64])
 xlate = hashlib.sha256(base + b'TKHO f64=1 sbuf=0 sg=64,32,32 gather=8 zero_locals bda').digest()
 want = set(sys.argv[1:])

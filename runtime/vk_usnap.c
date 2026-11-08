@@ -2,7 +2,7 @@
 // constants soon after; here the replay records for several milliseconds, and the GPU reads a pool's bytes when it
 // runs the part that uses them (the VRAM mirror's sync copies run then, vk_memory.c "VRAM mirror"). Meanwhile the game,
 // having handed the frame over, rewrites per-object uniform blocks on other threads with no fence: late draws read
-// another object's matrix (phantom rocks, a flat far field; NX2navi 1.2.1's producer f_70008c6460, 14-24 ms after the
+// another object's matrix (phantom rocks, a flat far field; Ocarina of Lain 1.2.1's producer f_70008c6460, 14-24 ms after the
 // submit). So at the start of a submission's recording every uniform range it binds is copied into an arena of its own,
 // and the uniform bindings of the replay use the copy.
 // - Only ranges of imported pools (memory the CPU writes) are copied, aligned out to 256 bytes (the largest

@@ -52,7 +52,7 @@ void nvn_guest_written(uint64_t addr, uint64_t size) {
     if (size) gfx_backend()->guest_written(addr, size);
 }
 
-// memcpy of pool storage the GPU rendered into must copy what the GPU wrote: NX2navi moves its generated grass maps
+// memcpy of pool storage the GPU rendered into must copy what the GPU wrote: Ocarina of Lain moves its generated grass maps
 // between pools with memcpy. Copies below 1 KiB skip the check; the copy itself is memmove, as overlapping
 // arguments are undefined for memcpy anyway.
 static void ov_memcpy(Cpu *c) {
@@ -602,7 +602,7 @@ NVN_API(nvnQueueFinish) {
     }
     gfx_backend()->cpu_synced(gfx_backend()->fence_done());
 }
-// ---------- Submit latency guard for NX2navi 1.2.1's per-object uniform double buffer
+// ---------- Submit latency guard for Ocarina of Lain 1.2.1's per-object uniform double buffer
 // NVN starts the GPU when QueueSubmitCommands returns, within microseconds; here the replay into Vulkan takes 15-30 ms
 // first, and the GPU reads uniform memory only after it. The game's producer f_70008c6460 (thread 0x103e, p56)
 // rewrites the half of its per-object uniform blocks that was front until the last flip, 14-23 ms after the submit

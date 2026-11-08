@@ -1,4 +1,4 @@
-// Screen-space contact shadows (NX2NAVI_CONTACT_SHADOWS, percent strength, 0 = off). NX2navi fills a full-resolution
+// Screen-space contact shadows (NX2NAVI_CONTACT_SHADOWS, percent strength, 0 = off). Ocarina of Lain fills a full-resolution
 // G-buffer whose targets include a B10G11R11 scene colour, an R32F linear depth (view distance / far) and a D32F depth
 // (is_gbuffer), lights it in half resolution, and then composites the lighting into that scene colour in one pass
 // whose only target is the scene colour, with a D16 depth that sorts pixels into material classes (is_composite).

@@ -109,7 +109,7 @@
  "warn.dlss_kept": "A DLSS library is already in the install folder ({path}); the setup keeps it.",
  "warn.dlss_download_failed": "NVIDIA DLSS could not be downloaded from {url}: {detail}. The game runs without it; the next setup run tries again.",
 
- "ui.title": "NX2navi Setup",
+ "ui.title": "Ocarina of Lain Setup",
  "ui.rebuild_title": "Rebuilding the game for your mods",
  "ui.start_game": "Start the game",
  "ui.version": "version {version}",
@@ -186,8 +186,8 @@
  "param.input.update": "update",
  "param.input.keys": "keys",
 
- "launcher.title": "NX2navi Setup",
- "launcher.python_missing": "The setup files are incomplete: the python folder next to NX2navi-Setup.exe is missing. Unpack the whole archive again and start NX2navi-Setup.exe from the unpacked folder.",
+ "launcher.title": "Ocarina of Lain Setup",
+ "launcher.python_missing": "The setup files are incomplete: the python folder next to OcarinaOfLain-Setup.exe is missing. Unpack the whole archive again and start OcarinaOfLain-Setup.exe from the unpacked folder.",
 
  "lang.ja": "Japanese",
  "lang.en-US": "English (US)",

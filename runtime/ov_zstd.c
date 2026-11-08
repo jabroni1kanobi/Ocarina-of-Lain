@@ -1,4 +1,4 @@
-// The game's zstd decoder on the host's libzstd. Most RomFS files of NX2navi 1.4.3 are zstd frames, many with a
+// The game's zstd decoder on the host's libzstd. Most RomFS files of Ocarina of Lain 1.4.3 are zstd frames, many with a
 // dictionary from Pack/ZsDic.pack.zs; the decoder is BSD zstd linked into main. The patch set "zstd"
 // (recomp/patches-v143.txt) sends every call of ZSTD_decompressMultiFrame (main+0x3a1f0) and of ZSTD_decompress_usingDDict
 // (main+0x3a1e0) to the two host functions below, on the patch page. Lifted, the decoder ran its literal and match

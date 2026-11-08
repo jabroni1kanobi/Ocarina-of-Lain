@@ -1,4 +1,4 @@
-"""The NX2navi installer: builds a playable folder from the player's own game files (docs/installer.md).
+"""The Ocarina of Lain installer: builds a playable folder from the player's own game files (docs/installer.md).
 
     python -m installer --base FILE --update FILE --keys FILE --lang CODE --dest DIR [--firmware DIR] [--root DIR]
                         [--temp DIR]

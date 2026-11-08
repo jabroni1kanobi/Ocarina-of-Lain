@@ -1,4 +1,4 @@
-// nx2navi.exe --probe-movie: the host movie::Decoder (ov_movie.c) on one NX2navi movie from the RomFS.
+// nx2navi.exe --probe-movie: the host movie::Decoder (ov_movie.c) on one Ocarina of Lain movie from the RomFS.
 // A small Matroska/WebM demuxer reads the VP9 frames of Event/Movie/<name>.webm (the smallest one, or the first whose
 // path contains NX2NAVI_PROBE_MOVIE). The probe then drives the decoder through the same HOST_OVERRIDE entries the game
 // calls, with a Cpu of its own; the guest functions the decoder calls (nn::os::SignalEvent, movie::Buffer,

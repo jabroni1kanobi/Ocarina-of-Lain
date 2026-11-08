@@ -294,7 +294,7 @@ static uint32_t block_inner(RtThread *t, int kind, int64_t ns) {
 }
 
 // ---- virtual cores
-// Horizon runs at most one thread per core, and NX2navi keys per-core data (allocators, job queues) by the current core
+// Horizon runs at most one thread per core, and Ocarina of Lain keys per-core data (allocators, job queues) by the current core
 // number without locks. A guest thread therefore holds one of the three application cores while it runs guest code
 // and gives it up only where Horizon would switch threads (waits, sleep, yield, exit, blocking host calls); a free
 // core goes to the best waiting thread. A waiter better than a holder asks one holder to give its core up (core_kick),

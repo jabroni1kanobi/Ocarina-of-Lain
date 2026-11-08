@@ -538,7 +538,7 @@ def navi_icon(n):
 
 
 def navi_ico():
-    """The launcher's icon (NX2navi.exe, the setup, the window, the taskbar) at the sizes Windows asks for."""
+    """The launcher's icon (OcarinaOfLain.exe, the setup, the window, the taskbar) at the sizes Windows asks for."""
     return ico_bytes([navi_icon(n) for n in (16, 20, 24, 32, 40, 48, 64, 96, 128, 256)])
 
 

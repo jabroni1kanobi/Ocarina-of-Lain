@@ -274,7 +274,7 @@ static int ensure_init(void) {
     }
     // NX2NAVI_VK_DYN_A2C=0/1 forces dynamic alpha to coverage off or on. Default off on AMD's Windows driver branch for
     // RDNA 2 and older (vk_caps.amd_sc), which applies alpha to coverage while the dynamic state says off: on an RX 590
-    // (24.9.1) NX2navi, which never turns it on, drew Link and the NPCs with depth but no colour (black silhouettes) and
+    // (24.9.1) Ocarina of Lain, which never turns it on, drew Link and the NPCs with depth but no colour (black silhouettes) and
     // dithered other surfaces into checkerboards (issue #67, RX 470/570/580). Taken out of the dynamic state, it goes
     // into the pipeline key and the characters draw.
     const char *da = cfg_get("NX2NAVI_VK_DYN_A2C");   // no fixed default: it depends on the driver, see above
@@ -1340,7 +1340,7 @@ static int target_count(const VkPipeState *s) {
 // fragment module whose output 1 is Location 0, Index 1 (spirv_dual_source).
 static int is_src1(unsigned f) { return f >= NVN_BLEND_FUNC_SRC1_COLOR && f <= NVN_BLEND_FUNC_ONE_MINUS_SRC1_ALPHA; }
 // Runs per draw (gkey_fill, target_wmask): only the blend factors of blend-enabled targets are read until one is SRC1,
-// which NX2navi never sets (0 of 876 pipelines in the field and fight saves).
+// which Ocarina of Lain never sets (0 of 876 pipelines in the field and fight saves).
 // NX2NAVI_VK_NOOPT=1: pipelines built without the driver's optimiser, for a driver whose shader compiler crashes on
 // one (the test switch for such a report); slower shaders, the same picture.
 static VkPipelineCreateFlags noopt_flag(void) {
@@ -3344,7 +3344,7 @@ static void lb_state(const uint32_t pr_hist[16], const uint32_t fs_hist[4]) {
     uint32_t best = 0, bf = 0;
     for (uint32_t i = 1; i < 16; i++) best = pr_hist[i] > pr_hist[best] ? i : best;
     for (uint32_t i = 1; i < 4; i++) bf = fs_hist[i] > fs_hist[bf] ? i : bf;
-    if (!pr_hist[best]) best = 8;   // no key file: NX2navi clips -w..w (all 2706 records of a recorded key file)
+    if (!pr_hist[best]) best = 8;   // no key file: Ocarina of Lain clips -w..w (all 2706 records of a recorded key file)
     LB.clamp = (uint8_t)(best & 1), LB.poly = (uint8_t)(best >> 1 & 3), LB.minus_w = (uint8_t)(best >> 3 & 1);
     LB.samples = (uint8_t)(1u << bf);
 }

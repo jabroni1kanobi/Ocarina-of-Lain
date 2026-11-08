@@ -50,7 +50,7 @@ static const RtLoaded *module_named(const char *name) {
     rt_fatal("boot: module %s is not loaded", name);
 }
 
-// The constructor flag is a NX2navi symbol the loader resolves; a title without it (or with a different
+// The constructor flag is a Ocarina of Lain symbol the loader resolves; a title without it (or with a different
 // name) reports "done" rather than dereferencing a null address.
 static uint32_t ctor_state(const RtLoaded *m) { return m->ctor_flag ? LD32(m->ctor_flag) : CTOR_DONE; }
 

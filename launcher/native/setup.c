@@ -1,7 +1,7 @@
-/* NX2navi-Setup.exe: the one-click setup. This program with the launcher's folder appended as a zip.
+/* OcarinaOfLain-Setup.exe: the one-click setup. This program with the launcher's folder appended as a zip.
 
-   It unpacks the zip into %LOCALAPPDATA%\Programs\NX2navi (no administrator rights), adds the Start menu and Desktop
-   shortcuts and the entry in Settings > Apps, and starts NX2navi.exe with --from <the setup's folder>, where the
+   It unpacks the zip into %LOCALAPPDATA%\Programs\OcarinaOfLain (no administrator rights), adds the Start menu and Desktop
+   shortcuts and the entry in Settings > Apps, and starts OcarinaOfLain.exe with --from <the setup's folder>, where the
    launcher looks for the player's dump first. A small window in the launcher's colours shows while it unpacks.
    When the folder already holds a newer version than the setup carries, the setup leaves the files alone (the
    launcher updates itself) and only repairs the shortcuts.
@@ -215,7 +215,7 @@ static int unzip(void)
         }
         if (!make_dirs(target)) { ok = 0; break; }
         if (!extract_entry(&z, local, csize, usize, method, crc, target)) {
-            fail_msg(L"%ls could not be written. Close NX2navi if it is open, then run the setup again.", target);
+            fail_msg(L"%ls could not be written. Close Ocarina of Lain if it is open, then run the setup again.", target);
             free(cd);
             CloseHandle(z.f);
             return 0;
@@ -324,11 +324,11 @@ static void run_with_window(HINSTANCE inst)
     wc.hInstance = inst;
     wc.hCursor = LoadCursor(NULL, IDC_WAIT);
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
-    wc.lpszClassName = L"NX2naviSetup";
+    wc.lpszClassName = L"Ocarina of LainSetup";
     RegisterClassW(&wc);
     int w = 440, h = 120;
     int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2, y = (GetSystemMetrics(SM_CYSCREEN) - h) / 3;
-    g_wnd = CreateWindowExW(WS_EX_APPWINDOW, wc.lpszClassName, L"NX2navi Setup", WS_POPUP | WS_VISIBLE, x, y, w, h,
+    g_wnd = CreateWindowExW(WS_EX_APPWINDOW, wc.lpszClassName, L"Ocarina of Lain Setup", WS_POPUP | WS_VISIBLE, x, y, w, h,
                             NULL, NULL, inst, NULL);
     SetTimer(g_wnd, 1, 200, NULL);
     HANDLE t = CreateThread(NULL, 0, work, NULL, 0, NULL);
@@ -364,12 +364,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
             if (!GetEnvironmentVariableW(L"LOCALAPPDATA", base, PATHN)) return 1;
             wcscat(base, L"\\Programs");
         }
-        swprintf(S.dest, PATHN, L"%ls\\%ls", base, APP_NAME);
+        swprintf(S.dest, PATHN, L"%ls\\OcarinaOfLain", base);
     }
     size_t dl = wcslen(S.dest);
     while (dl > 3 && (S.dest[dl - 1] == L'\\' || S.dest[dl - 1] == L'/')) S.dest[--dl] = 0;
     if (!read_trailer()) {
-        MessageBoxW(NULL, L"This setup is incomplete. Download NX2navi-Setup.exe again.", APP_NAME, MB_ICONERROR);
+        MessageBoxW(NULL, L"This setup is incomplete. Download OcarinaOfLain-Setup.exe again.", APP_NAME, MB_ICONERROR);
         return 1;
     }
     if (S.quiet) work(NULL);
@@ -381,7 +381,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     if (S.launch) {
         static wchar_t cmd[PATHN * 3];
         wchar_t exe[PATHN];
-        swprintf(exe, PATHN, L"%ls\\NX2navi.exe", S.dest);
+        swprintf(exe, PATHN, L"%ls\\OcarinaOfLain.exe", S.dest);
         swprintf(cmd, PATHN * 3, L"\"%ls\" --from \"%ls\"", exe, S.src_dir);
         STARTUPINFOW si = {.cb = sizeof si};
         PROCESS_INFORMATION pi;

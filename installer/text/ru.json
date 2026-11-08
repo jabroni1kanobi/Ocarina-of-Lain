@@ -109,7 +109,7 @@
  "warn.dlss_kept": "В папке установки уже есть библиотека DLSS ({path}); установка её оставляет.",
  "warn.dlss_download_failed": "Не удалось загрузить NVIDIA DLSS с {url}: {detail}. Игра работает и без него; при следующем запуске установка попробует снова.",
 
- "ui.title": "Установка NX2navi",
+ "ui.title": "Установка Ocarina of Lain",
  "ui.rebuild_title": "Пересборка игры под ваши моды",
  "ui.start_game": "Запустить игру",
  "ui.version": "версия {version}",
@@ -186,8 +186,8 @@
  "param.input.update": "обновление",
  "param.input.keys": "ключи",
 
- "launcher.title": "Установка NX2navi",
- "launcher.python_missing": "Файлы установки неполные: рядом с NX2navi-Setup.exe нет папки python. Распакуйте архив целиком заново и запустите NX2navi-Setup.exe из распакованной папки.",
+ "launcher.title": "Установка Ocarina of Lain",
+ "launcher.python_missing": "Файлы установки неполные: рядом с OcarinaOfLain-Setup.exe нет папки python. Распакуйте архив целиком заново и запустите OcarinaOfLain-Setup.exe из распакованной папки.",
 
  "lang.ja": "Японский",
  "lang.en-US": "Английский (США)",

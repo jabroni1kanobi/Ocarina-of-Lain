@@ -3,7 +3,7 @@
 // frame's view-projection and forward through last frame's; the vector is last frame's window position minus this
 // frame's, in render pixels, without the jitter (DLSS's default convention). Objects that move on their own get only
 // the camera's motion here: the per-object pass (vk_exec_draw.c) or the depth check below corrects theirs.
-// The camera block is NX2navi's scene uniform block (bound as c4 in the scene's vertex shaders): vec4 rows 3-6 are the
+// The camera block is Ocarina of Lain's scene uniform block (bound as c4 in the scene's vertex shaders): vec4 rows 3-6 are the
 // view-projection, rows of a row-major 4x4 with OpenGL clip depth (-w..w). The replay's viewports have negative
 // heights, so window y grows downwards from ndc y = +1, and depth is z_ndc * 0.5 + 0.5.
 // With pc.bias > 0 the pass also writes DLSS's bias mask (vk_dlaa.c, "characters"): G-buffer target 0 carries an object

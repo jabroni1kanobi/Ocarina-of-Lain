@@ -258,7 +258,7 @@ int vk_pool_init(pool_t *p) {
     // virtual pools that map it. Either gets device-local memory: 1.4.3's CPU never writes its 0x18c pool's storage
     // (unchanged over 3600 frames of the intro), so the guest storage and the GPU copy need no sync.
     if ((p->flags & NVN_MEMORY_POOL_FLAGS_GPU_NO_ACCESS) && !(p->flags & NVN_MEMORY_POOL_FLAGS_PHYSICAL)) return 1;
-    // A pool of zero bytes (NX2navi makes some now and then) holds no address the GPU can use: it gets no record. A record
+    // A pool of zero bytes (Ocarina of Lain makes some now and then) holds no address the GPU can use: it gets no record. A record
     // would import 0 bytes (invalid usage; the driver refuses the memory) and put an empty range into the index at the
     // pool's address, where a lookup of the pool that starts there found the empty one first. vk_pool_fini finds no
     // record for it and does nothing.
@@ -1522,7 +1522,7 @@ int vk_mem_mirror_probe(uint64_t addr) {
 
 // ---- write-back merge
 // A storage buffer a shader writes whole records of does not
-// go back to guest memory as a plain copy. The CPU may write fields of the same records while the GPU runs: NX2navi's
+// go back to guest memory as a plain copy. The CPU may write fields of the same records while the GPU runs: Ocarina of Lain's
 // particle emitters write a new particle's whole record into a free slot of a buffer that the simulation shaders update
 // (the waterfall splashes and mist, 2026-11-02), and a plain copy puts the mirror's stale copy of those words back over
 // them. Instead:

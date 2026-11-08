@@ -1,4 +1,4 @@
-# Code patches for NX2navi 1.1.0 main (recomp/patches.py). Copyright (c) 2026 MacNativeGames contributors (MIT; see
+# Code patches for Ocarina of Lain 1.1.0 main (recomp/patches.py). Copyright (c) 2026 MacNativeGames contributors (MIT; see
 # THIRD_PARTY_NOTICES.md). Each site was located in 1.1.0 from its 1.2.1 address by instruction-window matching and
 # its original words checked against this build's main. The patch page holds two floats the runtime writes at every
 # present (frame_rate.c): +0 the 30 Hz ratio (seconds * 30), +4 the frame step in seconds.

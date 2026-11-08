@@ -10,7 +10,7 @@ from pathlib import Path
 CREATE_NO_WINDOW = 0x08000000
 DETACHED_PROCESS = 0x00000008
 CREATE_NEW_PROCESS_GROUP = 0x00000200
-UNINSTALL_KEY = r'Software\Microsoft\Windows\CurrentVersion\Uninstall\NX2navi'
+UNINSTALL_KEY = r'Software\Microsoft\Windows\CurrentVersion\Uninstall\Ocarina of Lain'
 
 
 def dpi_aware():
@@ -30,7 +30,7 @@ def app_id():
     """Group the window under the launcher's own taskbar icon rather than python's."""
     if os.name == 'nt':
         try:
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('NX2navi.Launcher')
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('OcarinaOfLain.Launcher')
         except (AttributeError, OSError):
             pass
 

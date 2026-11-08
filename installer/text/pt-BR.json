@@ -109,7 +109,7 @@
  "warn.dlss_kept": "Já existe uma biblioteca DLSS na pasta de instalação ({path}); a instalação a mantém.",
  "warn.dlss_download_failed": "Não foi possível baixar o NVIDIA DLSS de {url}: {detail}. O jogo funciona sem ele; a próxima execução da instalação tenta de novo.",
 
- "ui.title": "Instalação do NX2navi",
+ "ui.title": "Instalação do Ocarina of Lain",
  "ui.rebuild_title": "Recompilando o jogo para os seus mods",
  "ui.start_game": "Iniciar o jogo",
  "ui.version": "versão {version}",
@@ -186,8 +186,8 @@
  "param.input.update": "atualização",
  "param.input.keys": "chaves",
 
- "launcher.title": "Instalação do NX2navi",
- "launcher.python_missing": "Os arquivos de instalação estão incompletos: a pasta python ao lado do NX2navi-Setup.exe não existe. Extraia o arquivo compactado inteiro de novo e abra o NX2navi-Setup.exe a partir da pasta extraída.",
+ "launcher.title": "Instalação do Ocarina of Lain",
+ "launcher.python_missing": "Os arquivos de instalação estão incompletos: a pasta python ao lado do OcarinaOfLain-Setup.exe não existe. Extraia o arquivo compactado inteiro de novo e abra o OcarinaOfLain-Setup.exe a partir da pasta extraída.",
 
  "lang.ja": "Japonês",
  "lang.en-US": "Inglês (EUA)",

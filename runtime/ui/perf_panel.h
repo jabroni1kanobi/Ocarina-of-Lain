@@ -9,7 +9,7 @@ extern "C" {
 
 typedef struct {
     PerfStats s;              // perfmon_snapshot
-    const char *version;      // "NX2navi <version>, game <update>"
+    const char *version;      // "Ocarina of Lain <version>, game <update>"
     char picture[6][64];      // window, game image, scene, scaling, frame limit, presentation (formatted)
     bool scene_known;         // the scene line is shown (resolution.c sets the scene's size)
     float fg_fps;             // frames the display gets with frame generation, 0 without it

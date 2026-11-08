@@ -12,7 +12,7 @@ body:
     id: version
     attributes:
       label: Version
-      description: The title line of the settings menu (F1), for example "NX2navi 0.0.1-ocarina - game 1.1.1".
+      description: The title line of the settings menu (F1), for example "Ocarina of Lain 0.0.1-ocarina - game 1.1.1".
     validations:
       required: true
   - type: input

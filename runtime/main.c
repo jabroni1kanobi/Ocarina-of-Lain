@@ -515,7 +515,7 @@ static void portable_paths(RtConfig *c) {
 int main(int argc, char **argv) {
     mem_init();   // first: claim the guest address space before anything else can land there; reads nx2navi.ini
     // The build that wrote the log, at its top: an attached log from another install or version shows at a glance.
-    rt_log("version: NX2navi %s, game %d.%d.%d", rt_port_version, rt_game_version / 100, rt_game_version / 10 % 10,
+    rt_log("version: Ocarina of Lain %s, game %d.%d.%d", rt_port_version, rt_game_version / 100, rt_game_version / 10 % 10,
            rt_game_version % 10);
     // A restart from the settings menu (gfx_present.c gfx_window_closed) starts this process while the one it replaces
     // is still exiting: its log, RomFS and saves are free once it is gone.

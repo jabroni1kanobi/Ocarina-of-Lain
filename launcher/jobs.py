@@ -25,7 +25,7 @@ STEPS = {
     'shaders': ('Prepare the Shaders', "Translating every shader of the game ahead of time, so play does not stop to "
                                        'compile them.'),
     'ready': ('Ready to Play', 'The game is built.'),
-    'download': ('Download {ver}', 'Downloading the new version of NX2navi.'),
+    'download': ('Download {ver}', 'Downloading the new version of Ocarina of Lain.'),
     'verify': ('Verify the Download', 'Checking the download against its checksum.'),
     'swap': ('Swap In the New Build', 'Linking the new build. It replaces the old one only once it is complete.'),
 }

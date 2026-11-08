@@ -12,7 +12,7 @@ them); otherwise the player picks a folder. Before the save is replaced it is co
 save taken from saves/ moves to saves/imported <time>, so nothing is lost and nothing is imported twice.
 
 A save folder can come from a Switch save backup (the save's files), an emulator (nested folders named by user and
-title ids, gone down while each holds only one folder), another NX2navi game folder or its profile folder (the
+title ids, gone down while each holds only one folder), another Ocarina of Lain game folder or its profile folder (the
 account folder inside).
 """
 import os
@@ -21,12 +21,12 @@ import shutil
 import time
 from pathlib import Path
 
-README = '''NX2navi saves folder
+README = '''Ocarina of Lain saves folder
 
-To import a save, put it here and select Import Saves in the NX2navi launcher (next to Game Folder):
+To import a save, put it here and select Import Saves in the Ocarina of Lain launcher (next to Game Folder):
 - the files of a Switch save backup, or the folder that holds them
 - an emulator's save folder for the game
-- the profile folder (or the whole game folder) of another NX2navi install
+- the profile folder (or the whole game folder) of another Ocarina of Lain install
 
 You can also select Import Saves and choose the folder instead.
 

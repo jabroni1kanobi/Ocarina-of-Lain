@@ -1,13 +1,13 @@
 # Installer
 
-A public release that turns the player's own game files into a playable NX2navi folder. The release carries no game
+A public release that turns the player's own game files into a playable Ocarina of Lain folder. The release carries no game
 data and no code derived from the game: the installer builds the game on the player's machine. The installed folder
 holds only the game; the installer and its tools stay outside it.
 
 ## What the player does
 
-1. Downloads `NX2navi-Setup-<version>-windows.zip` from GitHub Releases (none is published yet), unpacks it anywhere and
-   starts `NX2navi-Setup.exe`.
+1. Downloads `OcarinaOfLain-Setup-<version>-windows.zip` from GitHub Releases (none is published yet), unpacks it anywhere and
+   starts `OcarinaOfLain-Setup.exe`.
 2. Picks:
    - the base game (XCI or NSP) and the 1.1.0, 1.2.1 or 1.4.3 update (NSP); an NSZ or XCZ (compressed by the nsz
      tool) works as it is, the setup unpacks it itself;
@@ -140,7 +140,7 @@ python -m installer --base FILE --update FILE --keys FILE --lang CODE --dest DIR
 The unpacked release; `tools/make_release.py` assembles it and `--zip` packs it:
 
 ```
-NX2navi-Setup.exe        starts python/pythonw.exe -m installer.gui (installer/launcher/launcher.c, no console)
+OcarinaOfLain-Setup.exe        starts python/pythonw.exe -m installer.gui (installer/launcher/launcher.c, no console)
 installer/            the installer: steps, CLI, window, en/ru/zh-Hans text catalog
 python/               Python 3.14.9 embeddable + numpy, lz4, cryptography, cffi, pycparser (+ tkinter for the window)
 recomp/, tools/       the lifter and the build, extraction and shader scripts the steps run (copied from the repo)
@@ -173,7 +173,7 @@ nn::pl shared fonts). The game does not ship them. Without them it exits before 
 
 ## Linux release
 
-`tools/make_release_linux.py` builds the same setup for Linux and packs it as `NX2navi-Setup-x86_64.AppImage` (the static
+`tools/make_release_linux.py` builds the same setup for Linux and packs it as `OcarinaOfLain-Setup-x86_64.AppImage` (the static
 type-2 runtime: no libfuse2 needed on the host). The player makes it executable and starts it; on a Steam Deck, from
 Desktop Mode. The command-line setup needs the desktop session's display (`DISPLAY` or `WAYLAND_DISPLAY`) because preparing the
 shaders opens a window; the check step fails at once without it. Building the release also needs `make` and `pkg-config`. The bundled Tcl/Tk 9.0.4 is rebuilt with

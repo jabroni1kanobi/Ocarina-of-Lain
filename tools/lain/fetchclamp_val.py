@@ -1,6 +1,6 @@
 # fetchclamp_val.py [limit]: every cached shader with an image fetch goes through bin/fetchclamp_test.exe and spirv-val.
 import os, struct, subprocess, sys, tempfile
-G = r'C:\Users\Johnn\AppData\Local\Programs\NX2navi\game\shader-cache'
+G = r'C:\Users\Johnn\AppData\Local\Programs\Ocarina of Lain\game\shader-cache'
 V = r'C:\VulkanSDK\1.4.363.0\Bin\spirv-val.exe'; T = r'C:\Users\Johnn\Games\nx2navi-tools\bin\fetchclamp_test.exe'
 limit = int(sys.argv[1]) if len(sys.argv) > 1 else 10**9
 tmp = tempfile.mktemp(suffix='.spv')

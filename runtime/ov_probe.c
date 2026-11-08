@@ -761,7 +761,7 @@ static void probe_swkbd(void) {
 
     const char *def = ui_text(UI_SWKBD_DEFAULT_NAME);
     const KbCase cases[] = {
-        {2, 8, 9, 0, 0x2c, 0, 0, NULL, "Epona", "Epona", 0},                  // NX2navi's horse naming (main+0x1ecbf64)
+        {2, 8, 9, 0, 0x2c, 0, 0, NULL, "Epona", "Epona", 0},                  // Ocarina of Lain's horse naming (main+0x1ecbf64)
         {2, 8, 9, 0, 0x2c, 0, 0, NULL, "ABCDEFGHIJKL", "ABCDEFGHI", 0},        // at most 9
         {2, 8, 9, 0, 0x2c, 0, 0, NULL, "a@b%c\\d e/f", "abcd e/f", 0},         // '@' '%' '\' disabled
         {2, 8, 9, 0, 0x2c, 0, 0, NULL, "<cancel>", "", SWKBD_CANCELED},

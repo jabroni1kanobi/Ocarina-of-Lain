@@ -89,7 +89,7 @@ static const char *switch_language(const char *tag) {
     return "en-US";
 }
 
-// The game's language as a Switch language code (NX2NAVI_LANG, else NX2NAVI_LOCALE, else the Windows user locale). NX2navi
+// The game's language as a Switch language code (NX2NAVI_LANG, else NX2NAVI_LOCALE, else the Windows user locale). Ocarina of Lain
 // accepts "zh-Hans" and "zh-Hant" for Chinese and falls back to Japanese for "zh-CN" and "zh-TW", so those two
 // spellings, which older nx2navi.ini files and menus wrote, are mapped to them.
 const char *ov_language(void) {
@@ -849,7 +849,7 @@ static void ov_user_difference(Cpu *c) {
     ret_x(c, (uint64_t)((b->user.offset - a->user.offset) * 1000000000ll));
 }
 
-// ==== nn::pl shared fonts (shared_font.c). NX2navi asks for them only from its font loader, only with Simplified Chinese,
+// ==== nn::pl shared fonts (shared_font.c). Ocarina of Lain asks for them only from its font loader, only with Simplified Chinese,
 // Korean or Traditional Chinese text, and only for type 0; tools/extract_fonts.py writes
 // them from the user's firmware. Each type is read on first use into guest-visible memory as the BFTTF file the pl
 // shared memory holds; Address is 8 bytes past the file start (after the BFTTF header) and Size the decoded font size.

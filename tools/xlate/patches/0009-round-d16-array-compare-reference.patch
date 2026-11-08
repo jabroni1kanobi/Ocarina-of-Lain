@@ -8,7 +8,7 @@
 +                // NX2NAVI: the shadow cascades are D16 array textures. Maxwell rounds the compare reference to the texture's
 +                // 16-bit precision before the compare; Vulkan drivers may compare the full float (AMD does), so a lit
 +                // surface fails its own compare by a fraction of a step and the whole face reads as shadowed. Array
-+                // compares only: in NX2navi those are the D16 cascades (MacNativeGames 6283599 rounds the same ones).
++                // compares only: in Ocarina of Lain those are the D16 cascades (MacNativeGames 6283599 rounds the same ones).
 +                if (isArray)
 +                {
 +                    SpvInstruction d16Fp32 = context.TypeFP32();

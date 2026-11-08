@@ -2,7 +2,7 @@
 // The text entry is a window of the host (swkbd.h text_entry_run: swkbd_win.c with Win32, swkbd_sdl.c with SDL).
 //
 // nn::swkbd::ShowKeyboard: text entry for the game. On the Switch the call starts the keyboard library applet, which
-// takes the screen until the player confirms or cancels. NX2navi calls it in one place, naming a horse at a stable
+// takes the screen until the player confirms or cancels. Ocarina of Lain calls it in one place, naming a horse at a stable
 // (main+0x1ecbf64 -> main+0x1b2b3a0: UserName preset, at most 9 characters, '@' '%' '\' disabled, UTF-16 out, no
 // header, guide or initial text; an empty answer counts as not named).
 //

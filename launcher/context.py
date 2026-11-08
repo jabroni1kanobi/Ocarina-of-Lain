@@ -27,7 +27,7 @@ class Context:
             self._file = open(path, 'a', encoding='utf-8', errors='replace')
         except OSError:
             self._file = None
-        self.log(f'--- NX2navi launcher {self.version} ({"checkout" if self.layout.dev else "release"}) in '
+        self.log(f'--- Ocarina of Lain launcher {self.version} ({"checkout" if self.layout.dev else "release"}) in '
                  f'{self.layout.root}')
 
     def log(self, line):
