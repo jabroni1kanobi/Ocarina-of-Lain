@@ -2086,7 +2086,12 @@ static VkSampler make_sampler(VkCtx *c, const samp_par *d) {
         const float *b = d->border;
         if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0) si.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
         else if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 1) si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
-        else if (b[0] == 1 && b[1] == 1 && b[2] == 1 && b[3] == 1) si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+        else if (b[0] == 1 && b[1] == 1 && b[2] == 1 && b[3] == 1) {
+            // NX2NAVI_BORDER_TEST=1 (diagnosis): white borders of depth-map samplers read as black, to see what a map's edge reaches
+            static int flip = -1;
+            if (flip < 0) flip = rt_knob("BORDER_TEST", "0");
+            si.borderColor = flip && (si.compareEnable || d->wr == NVN_WRAP_MODE_CLAMP_TO_EDGE) ? VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK : VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+        }
         else if (sf.border_no_format) {
             memcpy(cb.customBorderColor.float32, b, 16);
             si.borderColor = VK_BORDER_COLOR_FLOAT_CUSTOM_EXT;

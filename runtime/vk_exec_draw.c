@@ -1454,6 +1454,11 @@ static uint32_t feedback_prepare(VkExec *ex, const GfxShader *fs) {
     uint32_t m = feedback_scan(ex, fs);
     uint32_t d = m & ex->fb_dirty;
     if (d) vk_exec_frame.fb_draws++;
+    // NX2NAVI_FB_LEARN_ALL=1: a draw that samples its own target goes through the feedback layout even when no earlier draw
+    // of this pass wrote it: the first draw of a pass reads and writes the same image too (the haze composite).
+    static int learn_all = -1;
+    if (learn_all < 0) learn_all = rt_knob("FB_LEARN_ALL", "0");
+    if (learn_all && mode == VK_FEEDBACK_LAYOUT) d |= m & ~ex->fbl_mask;
     if (d & ~(mode == VK_FEEDBACK_LAYOUT ? ex->fbl_mask : 0)) {
         if (mode == VK_FEEDBACK_LAYOUT)
             for (uint32_t i = 0; i < 9; i++) {
