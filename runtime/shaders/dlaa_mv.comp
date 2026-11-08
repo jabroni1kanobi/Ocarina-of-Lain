@@ -20,6 +20,9 @@
 // zero instead. Either way such a pixel gets the bias mask (pc.zmask), so DLSS takes this frame's colour where its
 // history holds something else (the trail behind a running Link). pc.dz: the projection's depth terms (rows 2 and 3,
 // columns 2 and 3) that take ndc depth back to view distance.
+// With pc.zfit > 1.5 a pixel that moved and did not keep its place also searches last frame's depth for where it came
+// from (track): falling leaves and walking characters get a vector of their own, which frame generation and FSR 3.1
+// need to place them; without one they show twice.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D depth_tex;
 layout(binding = 1, rg16f) uniform writeonly image2D mv_out;
@@ -66,6 +69,44 @@ float miss(vec2 w, float expect) {
     return best;
 }
 
+// How badly last frame's distances around q match this frame's around p: a cross of five samples, relative to here.
+const ivec2 CROSS[5] = ivec2[5](ivec2(0, 0), ivec2(-3, 0), ivec2(3, 0), ivec2(0, -3), ivec2(0, 3));
+float pattern_cost(ivec2 p, ivec2 q, float here, float near[5]) {
+    ivec2 hi = ivec2(pc.size) - 1;
+    float cost = 0.0;
+    for (int i = 0; i < 5; i++) {
+        float was = imageLoad(depth_prev, clamp(q + CROSS[i], ivec2(0), hi)).r;
+        cost += was > 0.0 && near[i] > 0.0 ? abs(was - near[i]) / here : (was > 0.0) != (near[i] > 0.0) ? 1.0 : 0.0;
+    }
+    return cost;
+}
+
+// Where the surface at p was last frame, searched around the camera's prediction: every 4 pixels within 24, then every
+// pixel within 3 of the best. Returns the offset from the prediction, or false when nothing fits clearly better than
+// the prediction itself (a thin leaf's edge, a surface that just came into view: the camera's vector stays).
+bool track(ivec2 p, vec2 predicted, float here, out vec2 off) {
+    float near[5];
+    ivec2 hi = ivec2(pc.size) - 1;
+    for (int i = 0; i < 5; i++) near[i] = dist(texelFetch(depth_tex, clamp(p + CROSS[i], ivec2(0), hi), 0).r * 2.0 - 1.0);
+    ivec2 at = ivec2(floor(predicted));
+    float none = pattern_cost(p, at, here, near), best = 1e9;
+    ivec2 pick = ivec2(0);
+    for (int y = -24; y <= 24; y += 4)
+        for (int x = -24; x <= 24; x += 4) {
+            float c = pattern_cost(p, at + ivec2(x, y), here, near) + 1e-4 * float(abs(x) + abs(y));
+            if (c < best) best = c, pick = ivec2(x, y);
+        }
+    ivec2 mid = pick;
+    for (int y = -3; y <= 3; y++)
+        for (int x = -3; x <= 3; x++) {
+            ivec2 o = mid + ivec2(x, y);
+            float c = pattern_cost(p, at + o, here, near) + 1e-4 * float(abs(o.x) + abs(o.y));
+            if (c < best) best = c, pick = o;
+        }
+    off = vec2(pick);
+    return best < 0.1 && best < none * 0.5;   // five samples within about 2 % each, and clearly better than none
+}
+
 mat4 vp(vec4 a, vec4 b, vec4 c, vec4 d) { return transpose(mat4(a, b, c, d)); }
 
 void main() {
@@ -99,7 +140,9 @@ void main() {
         float cam = there > 0.0 ? miss(win + mv, there) : 1e9;
         if (cam > TOL) {
             moved = 1.0;
+            vec2 off;
             if (miss(win, here) < TOL) mv = vec2(0.0);   // it kept its place on screen: the followed character
+            else if (pc.zfit > 1.5 && track(p, win + mv, here, off)) mv += off;
         }
     }
     imageStore(mv_out, p, vec4(mv, 0.0, 0.0));

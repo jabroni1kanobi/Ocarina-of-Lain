@@ -816,8 +816,10 @@ static int mv_pass(VkExec *ex, struct Size *e, VkImageView zv, float jx, float j
     static int zfit_on = -1;
     if (zfit_on < 0) zfit_on = rt_knob("DLAA_ZFIT", "1");
     int zfit = zfit_on && !use && cr && D.cam_size == OCAM_BLOCK;
+    static int mv_track = -1;   // NX2NAVI_MV_TRACK=0: moved pixels keep the camera's vector (dlaa_mv.comp, track)
+    if (mv_track < 0) mv_track = rt_knob("MV_TRACK", "1");
     MvPush pc = {{(float)w, (float)h}, {jx, jy}, use ? bias : 0.0f, use && e->chars_ok ? 1.0f : 0.0f,
-                 zfit ? 1.0f : 0.0f, zfit && e->dist_ok ? 1.0f : 0.0f,
+                 zfit ? (mv_track ? 2.0f : 1.0f) : 0.0f, zfit && e->dist_ok ? 1.0f : 0.0f,
                  {zfit ? cr[38] : 0.0f, zfit ? cr[39] : 0.0f, zfit ? cr[42] : 0.0f, zfit ? cr[43] : 0.0f},
                  zfit ? bias : 0.0f};
     vkCmdPushConstants(cb, D.mv_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
