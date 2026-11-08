@@ -566,6 +566,63 @@ static int spirv_complete(const uint32_t *w, uint64_t n) {
     return i == n;
 }
 
+// The translator's registers are float variables, so an integer the game moves around can become a float constant with
+// those bits: 1 is a denormal, -1 a NaN. The Maxwell GPU moves such values untouched. AMD's default float mode flushes
+// the denormal and quiets the NaN, which turned the +1/-1 sign of the leaf sprites' scale into 0 and 2e9: triangles over
+// the whole shadow map, 1.7 billion fragments a frame on an RX 9070. A module holding such a constant declares that it
+// needs those bits kept (SPV_KHR_float_controls, 32-bit). In memory only: the cache keys and files stay as they are.
+// NX2NAVI_FLOAT_BITS=0 turns this off (diagnosis).
+static void spirv_float_bits(uint32_t **spirv, uint64_t *words) {
+    enum { OP_EXTENSION = 10, OP_EXT_IMPORT = 11, OP_MEMORY_MODEL = 14, OP_ENTRY_POINT = 15, OP_EXEC_MODE = 16,
+           OP_CAPABILITY = 17, OP_TYPE_FLOAT = 22, OP_CONSTANT = 43, CAP_DENORM_PRESERVE = 4464, CAP_NAN_PRESERVE = 4466,
+           MODE_DENORM_PRESERVE = 4459, MODE_NAN_PRESERVE = 4461, MAX_ENTRIES = 8 };
+    static const char ext[] = "SPV_KHR_float_controls";   // 22 characters and the terminator: 6 words
+    static int on = -1;
+    if (on < 0) on = rt_knob("FLOAT_BITS", "1");
+    if (!on) return;
+    const uint32_t *w = *spirv;
+    uint64_t n = *words, first_cap = 0, first_ext = 0, after_entries = 0;
+    uint32_t entries[MAX_ENTRIES], nent = 0, f32 = 0;
+    int raw = 0;
+    for (uint64_t i = 5; i < n; i += w[i] >> 16) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (op == OP_CAPABILITY && !first_cap) first_cap = i;
+        else if ((op == OP_EXTENSION || op == OP_EXT_IMPORT || op == OP_MEMORY_MODEL) && !first_ext) first_ext = i;
+        else if (op == OP_CAPABILITY && (w[i + 1] == CAP_DENORM_PRESERVE || w[i + 1] == CAP_NAN_PRESERVE)) return;
+        else if (op == OP_ENTRY_POINT) {
+            if (nent == MAX_ENTRIES) return;
+            entries[nent++] = w[i + 2];
+            after_entries = i + len;
+        } else if (op == OP_TYPE_FLOAT && w[i + 2] == 32) f32 = w[i + 1];
+        else if (op == OP_CONSTANT && w[i + 1] == f32 && f32 && len == 4) {
+            uint32_t e = w[i + 3] >> 23 & 255, m = w[i + 3] & 0x7fffff;
+            raw |= (e == 0 || e == 255) && m;
+        }
+    }
+    if (!raw || !first_cap || !first_ext || !nent) return;
+    uint32_t add = 2 + 2 + 7 + nent * 8;
+    uint32_t *o = malloc((n + add) * 4);
+    if (!o) rt_fatal("gfx_shader: out of memory");
+    uint64_t k = 0;
+    memcpy(o, w, first_cap * 4), k = first_cap;
+    o[k++] = 2u << 16 | OP_CAPABILITY, o[k++] = CAP_DENORM_PRESERVE;
+    o[k++] = 2u << 16 | OP_CAPABILITY, o[k++] = CAP_NAN_PRESERVE;
+    memcpy(o + k, w + first_cap, (first_ext - first_cap) * 4), k += first_ext - first_cap;
+    o[k++] = 7u << 16 | OP_EXTENSION;
+    memset(o + k, 0, 6 * 4), memcpy(o + k, ext, sizeof ext - 1), k += 6;
+    memcpy(o + k, w + first_ext, (after_entries - first_ext) * 4), k += after_entries - first_ext;
+    for (uint32_t i = 0; i < nent; i++) {
+        o[k++] = 4u << 16 | OP_EXEC_MODE, o[k++] = entries[i], o[k++] = MODE_DENORM_PRESERVE, o[k++] = 32;
+        o[k++] = 4u << 16 | OP_EXEC_MODE, o[k++] = entries[i], o[k++] = MODE_NAN_PRESERVE, o[k++] = 32;
+    }
+    memcpy(o + k, w + after_entries, (n - after_entries) * 4), k += n - after_entries;
+    free(*spirv);
+    *spirv = o, *words = k;
+    static volatile int32_t marked;
+    int32_t c = plat_inc32(&marked);
+    if (c == 1 || c % 500 == 0) rt_log("gfx_shader: %d modules keep raw float bits so far (float controls)", c);
+}
+
 // Reads <key>.spv and <key>.res.json from the pack (packed 1) or the loose files; NULL if either is missing or
 // malformed. iid: the input id, NULL when the caller sets it.
 static GfxShader *disk_load_from(const uint8_t key[32], const uint8_t *iid, int packed) {
@@ -595,6 +652,19 @@ static GfxShader *disk_load_from(const uint8_t key[32], const uint8_t *iid, int 
         free(res), free(spv);
         return NULL;
     }
+    // NX2NAVI_SPV_IID=<dir> (diagnosis): <dir>/<first 8 bytes of the input id, hex>.spv replaces this module, so one
+    // shader can be tried edited without a new translator identity and a retranslation of the whole cache.
+    const char *ov = iid ? cfg_get("NX2NAVI_SPV_IID") : NULL;
+    if (ov && *ov) {
+        char op[PATH_CAP + 80];
+        snprintf(op, sizeof op, "%s/%02x%02x%02x%02x%02x%02x%02x%02x.spv", ov, iid[0], iid[1], iid[2], iid[3], iid[4], iid[5], iid[6], iid[7]);
+        uint64_t osz = 0;
+        uint8_t *o = read_file(op, &osz);
+        if (o && osz >= 20 && osz % 4 == 0) {
+            free(spv), spv = o, spv_size = osz;
+            rt_log("gfx_shader: override %s", op);
+        } else free(o);
+    }
     GfxShader *s = calloc(1, sizeof *s);
     memcpy(s->key, key, 32);
     if (iid) memcpy(s->iid, iid, 32);
@@ -604,6 +674,7 @@ static GfxShader *disk_load_from(const uint8_t key[32], const uint8_t *iid, int 
     s->reflection_size = res_size;
     reflect(s);
     if (s->stage == GFX_STAGE_FS) vk_hdr_shader_swap(&s->spirv, &s->words);   // the in-memory copy; the cache keeps its own
+    spirv_float_bits(&s->spirv, &s->words);
     return s;
 }
 

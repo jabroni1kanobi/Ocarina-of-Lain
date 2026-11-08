@@ -119,6 +119,7 @@ int vk_pass_marks_want_nv(void);
 // id, kind and fence set, for the caller to fill. NULL when pass marks are off. Replay thread only.
 VkPassMark *vk_pass_mark_begin(VkCommandBuffer cb, int kind, uint64_t fence);
 void vk_pass_mark_end(VkCommandBuffer cb, const VkPassMark *m);   // records the end of mark m into cb
+VkBuffer vk_pass_time_count_slot(VkDeviceSize *off);   // NX2NAVI_PASSTIME: where the next mark's mesh group count goes
 // The recorder thread's side of both (vk_rec.c): the marker and checkpoint commands themselves.
 void vk_pass_mark_cmd(VkCommandBuffer cb, uint32_t id, int end);
 // AMD only: the last mark the GPU started and the last it finished (0: none); 0 without buffer marks.

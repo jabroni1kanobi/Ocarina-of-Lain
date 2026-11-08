@@ -10,10 +10,12 @@
 // per pass and dispatch, numbers in a ring of 4096, text only at the device loss.
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cfg.h"
 #include "host.h"
+#include "nvn_api.h"
 #include "vk.h"
 
 static PFN_vkCmdWriteBufferMarkerAMD write_marker;
@@ -114,7 +116,146 @@ static void pass_marks_init(VkCtx *c) {
                                               : "no VK_AMD_buffer_marker; NX2NAVI_PASS_CRUMBS=1 asks for NVIDIA checkpoints");
 }
 
+// ---- per-mark GPU times (NX2NAVI_PASSTIME=<first frame>[:<frames>], NX2NAVI_PASSTIME_OUT=<file>): a timestamp at the
+// start and the end of every pass and dispatch of a window of frames, written as a table once the window has finished
+// on the GPU. Marks of the window are consecutive ids, so a mark's query pair is its distance from the first. A full
+// barrier precedes every mark, so a start stamp is when all earlier work finished; the time between one mark's end and
+// the next one's start is the barrier and whatever else ran there (copies, clears, uploads, the present).
+enum { PT_MAX = 16384 };
+typedef struct { uint64_t frame; VkPassMark m; int ended; } PtRec;
+static VkBuffer pt_counts;                  // one word per mark: the mesh groups of its indirect draw
+static volatile uint32_t *pt_counts_map;
+static int pt_state;                        // 0 not read yet, -1 off, 1 waiting for the frame, 2 in the window, 3 done
+static uint64_t pt_first, pt_frames;
+static VkQueryPool pt_pool, pt_stats;         // timestamps; fragment shader invocations and rasterized primitives
+static PFN_vkCmdBeginQuery pt_qbegin;
+static PFN_vkCmdEndQuery pt_qend;
+static PFN_vkCmdWriteTimestamp pt_write;
+static PFN_vkCmdResetQueryPool pt_reset;
+static PtRec *pt_rec;
+static volatile uint32_t pt_first_id, pt_end_id;   // the window: pt_first_id <= id < pt_end_id; 0 end: still open
+
+static unsigned long long shader_id(const GfxShader *s);
+
+static void pt_dump(void *arg) {
+    (void)arg;
+    VkCtx *c = vk_ctx();
+    uint32_t n = pt_end_id - pt_first_id;
+    const char *path = cfg_get("NX2NAVI_PASSTIME_OUT");
+    FILE *f = fopen(path && *path ? path : "passtime.tsv", "w");
+    if (!f) {
+        rt_log("vk: passtime: cannot write the table");
+        return;
+    }
+    float period = c->props.limits.timestampPeriod;
+    uint64_t base = 0;
+    uint32_t have = 0;
+    fprintf(f, "frame\tkind\tfence\tstep\tw\th\td\tncolor\tcolor0\tdepth\tdraws\tfirst0\tfirst1\tlast0\tlast1\tstart_us\tend_us\tgroups\tfrags\tprims\n");
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t v[4];
+        VkResult r = vkGetQueryPoolResults(c->device, pt_pool, 2 * i, 2, sizeof v, v, 2 * sizeof v[0],
+                                           VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        uint64_t st[3] = {0, 0, 0};
+        if (pt_stats) vkGetQueryPoolResults(c->device, pt_stats, i, 1, sizeof st, st, sizeof st, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        PtRec *p = &pt_rec[i];
+        if (r != VK_SUCCESS || !v[1] || !v[3] || !p->ended) continue;
+        if (!base) base = v[0];
+        have++;
+        const VkPassMark *m = &p->m;
+        fprintf(f, "%llu\t%c\t%llu\t%u\t%u\t%u\t%u\t%u\t%d\t%d\t%u\t%016llx\t%016llx\t%016llx\t%016llx\t%.2f\t%.2f\t%u\t%llu\t%llu\n",
+                (unsigned long long)p->frame, m->kind == VK_MARK_DISPATCH ? 'D' : 'P', (unsigned long long)m->fence, m->step,
+                m->w, m->h, m->d, m->ncolor, m->ncolor ? (int)m->color[0] : 0, (int)m->depth,
+                m->draws == UINT32_MAX ? 0 : m->draws, shader_id(m->first[0]), shader_id(m->first[1]), shader_id(m->last[0]),
+                shader_id(m->last[1]), (double)(int64_t)(v[0] - base) * period / 1000.0,
+                (double)(int64_t)(v[2] - base) * period / 1000.0, pt_counts_map ? pt_counts_map[i] : 0, (unsigned long long)st[0], (unsigned long long)st[1]);
+    }
+    fclose(f);
+    rt_log("vk: passtime: %u of %u marks written", have, n);
+}
+
+static void pt_open(VkCtx *c) {
+    const char *e = cfg_get("NX2NAVI_PASSTIME");
+    unsigned long long a = 0, b = 4;
+    pt_state = -1;
+    if (!e || sscanf(e, "%llu:%llu", &a, &b) < 1 || !a) return;
+    VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP,
+                                .queryCount = 2 * PT_MAX};
+    pt_write = (PFN_vkCmdWriteTimestamp)vkGetDeviceProcAddr(c->device, "vkCmdWriteTimestamp");
+    pt_reset = (PFN_vkCmdResetQueryPool)vkGetDeviceProcAddr(c->device, "vkCmdResetQueryPool");
+    pt_rec = calloc(PT_MAX, sizeof *pt_rec);
+    pt_qbegin = (PFN_vkCmdBeginQuery)vkGetDeviceProcAddr(c->device, "vkCmdBeginQuery");
+    pt_qend = (PFN_vkCmdEndQuery)vkGetDeviceProcAddr(c->device, "vkCmdEndQuery");
+    VkQueryPoolCreateInfo si = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS,
+                                .queryCount = PT_MAX,
+                                .pipelineStatistics = VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT |
+                                                      VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT};
+    if (!pt_qbegin || !pt_qend || vkCreateQueryPool(c->device, &si, NULL, &pt_stats) != VK_SUCCESS) pt_stats = VK_NULL_HANDLE;
+    if (!pt_write || !pt_reset || !pt_rec || vkCreateQueryPool(c->device, &qi, NULL, &pt_pool) != VK_SUCCESS) return;
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 4 * PT_MAX, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                  .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+                                  .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
+    VmaAllocation al;
+    VmaAllocationInfo info;
+    if (vmaCreateBuffer(c->vma, &bi, &ai, &pt_counts, &al, &info) == VK_SUCCESS) {
+        pt_counts_map = info.pMappedData;
+        memset((void *)pt_counts_map, 0, 4 * PT_MAX);
+    }
+    pt_first = a, pt_frames = b;
+    pt_state = 1;
+    rt_log("vk: passtime: %llu frames from frame %llu", b, a);
+}
+
+// Replay thread: a new mark with this id, in submission `fence`.
+static void pt_begin(uint32_t id, uint64_t fence) {
+    if (!pt_state) pt_open(vk_ctx());
+    if (pt_state <= 0 || pt_state == 3) return;
+    uint64_t frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (pt_state == 1) {
+        if (frame < pt_first) return;
+        __atomic_store_n(&pt_first_id, id, __ATOMIC_RELEASE);
+        pt_state = 2;
+    }
+    if (frame >= pt_first + pt_frames || id - pt_first_id >= PT_MAX) {
+        __atomic_store_n(&pt_end_id, id, __ATOMIC_RELEASE);
+        pt_state = 3;
+        vk_completion_add(fence, pt_dump, NULL);
+        return;
+    }
+    pt_rec[id - pt_first_id].frame = frame;
+}
+
+// The buffer and offset that take the mesh group count of the mark about to begin (the pass of an indirect mesh draw),
+// VK_NULL_HANDLE outside the window. Replay thread, before the pass opens.
+VkBuffer vk_pass_time_count_slot(VkDeviceSize *off) {
+    uint32_t a = __atomic_load_n(&pt_first_id, __ATOMIC_ACQUIRE);
+    if (pt_state != 2 || !a || !pt_counts) return VK_NULL_HANDLE;
+    uint32_t i = seq + 1 - a;
+    if (i >= PT_MAX) return VK_NULL_HANDLE;
+    *off = 4ull * i;
+    return pt_counts;
+}
+
+static int pt_in_window(uint32_t id) {
+    uint32_t a = __atomic_load_n(&pt_first_id, __ATOMIC_ACQUIRE), b = __atomic_load_n(&pt_end_id, __ATOMIC_ACQUIRE);
+    return a && id >= a && (!b || id < b) && id - a < PT_MAX;
+}
+
 void vk_pass_mark_cmd(VkCommandBuffer cb, uint32_t id, int end) {
+    if (pt_pool && pt_in_window(id)) {
+        uint32_t q = 2 * (id - pt_first_id);
+        if (!end) {
+            pt_reset(cb, pt_pool, q, 2);
+            pt_write(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, pt_pool, q);
+            if (pt_stats) {
+                pt_reset(cb, pt_stats, q / 2, 1);
+                pt_qbegin(cb, pt_stats, q / 2, 0);
+            }
+        } else {
+            if (pt_stats) pt_qend(cb, pt_stats, q / 2);
+            pt_write(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pt_pool, q + 1);
+        }
+    }
     if (pm_amd)
         write_marker(cb, end ? VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, buf,
                      end ? 12 : 8, id);
@@ -127,12 +268,20 @@ VkPassMark *vk_pass_mark_begin(VkCommandBuffer cb, int kind, uint64_t fence) {
     if (!id) id = ++seq;   // 0 means no mark
     VkPassMark *m = &ring[id & (VK_PASS_MARKS - 1)];
     m->id = id, m->kind = (uint8_t)kind, m->fence = fence, m->draws = UINT32_MAX;
+    pt_begin(id, fence);
     rec_pass_mark(cb, id, 0);
     return m;
 }
 
 void vk_pass_mark_end(VkCommandBuffer cb, const VkPassMark *m) {
-    if (m && cb) rec_pass_mark(cb, m->id, 1);
+    if (m && cb) {
+        if (pt_pool && pt_in_window(m->id)) {
+            PtRec *p = &pt_rec[m->id - pt_first_id];
+            p->m = *m;
+            p->ended = 1;
+        }
+        rec_pass_mark(cb, m->id, 1);
+    }
 }
 
 int vk_pass_marks_read(uint32_t *started, uint32_t *finished) {

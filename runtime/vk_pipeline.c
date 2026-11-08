@@ -865,6 +865,8 @@ static int uses_subgroup_ops(const uint32_t *w, uint64_t words) {
     return 0;
 }
 
+static uint32_t local_size_x(const uint32_t *w, uint64_t words);
+
 // Chain {size 32} into a stage create info when the stage uses subgroup ops and the driver allows the pin.
 static void pin_subgroup32(VkPipelineShaderStageCreateInfo *st, VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *rq,
                            const uint32_t *w, uint64_t words) {
@@ -872,6 +874,14 @@ static void pin_subgroup32(VkPipelineShaderStageCreateInfo *st, VkPipelineShader
     *rq = (VkPipelineShaderStageRequiredSubgroupSizeCreateInfo){
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, .requiredSubgroupSize = vk_caps.sg_size};
     st->pNext = rq;
+    // NX2NAVI_MESH_FULL=1 (diagnosis, off): full subgroups for mesh and task stages. Measured on the RX 9070 with the
+    // camera held still: 2627 M fragments a frame against 1679 M without it, and 33 ms against 24 ms.
+    static int full = -1;
+    if (full < 0) full = rt_knob("MESH_FULL", "0");
+    uint32_t lx = local_size_x(w, words);
+    if (full && (st->stage & (VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT)) && P.f_full_subgroups && lx &&
+        lx % vk_caps.sg_size == 0)
+        st->flags |= VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
 }
 
 // The x of a compute module's LocalSize (OpExecutionMode 17), 0 when it has none.

@@ -3857,6 +3857,12 @@ static int mesh_ring_entry(VkExec *ex, const VkMemSpan *src, VkDeviceSize *at) {
     vkCmdFillBuffer(ex->cb, mesh_ring, *at + 4, 8, 1);
     VkBufferCopy cp = {src->offset, *at, 4};
     vkCmdCopyBuffer(ex->cb, src->buffer, mesh_ring, 1, &cp);
+    VkDeviceSize pt_off;
+    VkBuffer pt_buf = vk_pass_time_count_slot(&pt_off);
+    if (pt_buf) {
+        VkBufferCopy pc = {src->offset, pt_off, 4};
+        vkCmdCopyBuffer(ex->cb, src->buffer, pt_buf, 1, &pc);
+    }
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
                            .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
                            .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
