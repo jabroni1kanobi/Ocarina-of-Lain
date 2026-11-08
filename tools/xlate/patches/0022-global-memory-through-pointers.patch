@@ -1,0 +1,403 @@
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+@@ -160,6 +160,34 @@
+                 }
+             }
+ 
++            // NX2NAVI: 32-bit words the program loaded from a storage buffer at a constant byte offset (the halves of a
++            // pointer the buffer holds: Ocarina's NVN2 shaders read pointer tables through c0), and the local or shared
++            // memory words such a value was spilled to. FindBaseInAddTree takes them as buffer bases.
++            public readonly Dictionary<Operand, PointerWord> PointerWords = [];
++            private readonly Dictionary<LsKey, PointerWord> _pointerMemory = [];
++
++            // A store of a pointer word, of one reloaded from memory (the spills of tools/xlate/AmpereLowering.cs store
++            // every reloaded register back), or of a sum with exactly one such term (a pointer advanced by an index, as
++            // IMAD.WIDE leaves it) maps the memory word to that pointer; any other store unmaps it.
++            public void NotePointerStore(LsMemoryType type, Operand baseOffset, int constOffset, Operand value)
++            {
++                LsKey key = new(baseOffset, constOffset, type);
++
++                if (TryGetPointerSum(this, value, out PointerWord word))
++                {
++                    _pointerMemory[key] = word;
++                }
++                else
++                {
++                    _pointerMemory.Remove(key);
++                }
++            }
++
++            public bool TryGetPointerMemory(LsMemoryType type, Operand baseOffset, int constOffset, out PointerWord word)
++            {
++                return _pointerMemory.TryGetValue(new LsKey(baseOffset, constOffset, type), out word);
++            }
++
+             public bool TryGetMemoryTargetCb(LsMemoryType type, Operand baseOffset, int constOffset, out SearchResult result)
+             {
+                 LsKey key = new(baseOffset, constOffset, type);
+@@ -182,6 +210,10 @@
+             }
+         }
+ 
++        // NX2NAVI: a word loaded from the storage buffer whose address is at c[Slot][Offset] (word offset), ByteOffset
++        // bytes into that buffer.
++        private readonly record struct PointerWord(int Slot, int Offset, int ByteOffset);
++
+         private readonly struct SearchResult
+         {
+             public static SearchResult NotFound => new(-1, 0);
+@@ -190,6 +222,8 @@
+             public int SbCbOffset { get; }
+             public Operand Offset { get; }
+             public int ConstOffset { get; }
++            // NX2NAVI: the base address when it is not c[SbCbSlot][SbCbOffset] (a pointer loaded from memory).
++            public Operand Base { get; init; }
+ 
+             public SearchResult(int sbCbSlot, int sbCbOffset)
+             {
+@@ -273,6 +307,8 @@
+                                 uint targetCb = PackCbSlotAndOffset(result.SbCbSlot, result.SbCbOffset);
+                                 gtsContext.AddMemoryTargetCb(type, baseOffset, constOffset, targetCb, result);
+                             }
++
++                            gtsContext.NotePointerStore(type, baseOffset, constOffset, value);
+                         }
+                     }
+                 }
+@@ -308,6 +344,11 @@
+             Operand globalAddress = operation.GetSource(0);
+             SearchResult result = FindUniqueBaseAddressCb(gtsContext, block, globalAddress, needsOffset: true);
+ 
++            if (!result.Found && globalAddress.AsgOp is not PhiNode)
++            {
++                result = FindBaseInAddTree(gtsContext, resourceManager, gpuAccessor, node, operation);
++            }
++
+             if (result.Found)
+             {
+                 // We found the storage buffer that is being accessed.
+@@ -317,11 +358,21 @@
+ 
+                 Operand offset = result.Offset;
+ 
++                // NX2NAVI: a 32-bit load at a constant offset of a buffer whose address is in a constant buffer may be
++                // half of a pointer stored there; FindBaseInAddTree takes such words as bases of later accesses.
++                if (operation.Inst == Instruction.Load && operation.StorageKind == StorageKind.GlobalMemory &&
++                    operation.Dest != null && result.Base == null && result.SbCbSlot < PointerSlotFlag &&
++                    offset != null && offset.Type == OperandType.Constant)
++                {
++                    gtsContext.PointerWords[operation.Dest] =
++                        new PointerWord(result.SbCbSlot, result.SbCbOffset, offset.Value + result.ConstOffset);
++                }
++
+                 bool storageUnaligned = gpuAccessor.QueryHasUnalignedStorageBuffer();
+ 
+                 if (storageUnaligned)
+                 {
+-                    Operand baseAddress = Cbuf(result.SbCbSlot, result.SbCbOffset);
++                    Operand baseAddress = result.Base ?? Cbuf(result.SbCbSlot, result.SbCbOffset);
+ 
+                     Operand baseAddressMasked = Local();
+                     Operand hostOffset = Local();
+@@ -655,7 +706,7 @@
+ 
+             if (targetCbs.Count == 0)
+             {
+-                gpuAccessor.Log($"Failed to find storage buffer for global memory operation \"{operation.Inst}\".");
++                gpuAccessor.Log($"Failed to find storage buffer for global memory operation \"{operation.Inst}\" at {DescribeAddress(operation.GetSource(0), 5)}.");
+             }
+ 
+             if (gtsContext.TryGetFunctionId(operation, isMultiTarget: true, targetCbs, out functionId))
+@@ -696,7 +747,10 @@
+ 
+                 Operand inRangeHigh = context.ICompareEqual(addrHighBorrowed, baseAddrHigh);
+ 
+-                Operand inRange = context.BitwiseAnd(inRangeLow, inRangeHigh);
++                // NX2NAVI: with one candidate the word after the address is not needed to tell buffers apart, and it is
++                // not always a size: an NVN2 compute program's pushed constants hold bare pointers, which the host binds
++                // up to the end of their memory (runtime/vk_exec_draw.c push_ptr). Robust buffer access bounds the rest.
++                Operand inRange = targetCbs.Count == 1 ? inRangeHigh : context.BitwiseAnd(inRangeLow, inRangeHigh);
+ 
+                 Operand lblSkip = Label();
+                 context.BranchIfFalse(lblSkip, inRange);
+@@ -774,6 +828,33 @@
+             return true;
+         }
+ 
++        // NX2NAVI: the expression an unresolved address comes from, for the note (diagnosis only).
++        private static string DescribeAddress(Operand op, int depth)
++        {
++            switch (op.Type)
++            {
++                case OperandType.Constant: return $"0x{op.Value:x}";
++                case OperandType.ConstantBuffer: return $"c{op.GetCbufSlot()}[0x{op.GetCbufOffset() * 4:x}]";
++                case OperandType.LocalVariable: break;
++                default: return op.Type.ToString();
++            }
++            if (depth == 0) return "_";
++            if (op.AsgOp is PhiNode phi)
++            {
++                HashSet<string> parts = [];
++                for (int i = 0; i < phi.SourcesCount && parts.Count < 4; i++) parts.Add(DescribeAddress(phi.GetSource(i), depth - 1));
++                return $"phi({string.Join(",", parts)})";
++            }
++            if (op.AsgOp is Operation o)
++            {
++                string name = o.Inst == Instruction.Load ? $"ld.{o.StorageKind}" : o.Inst.ToString();
++                List<string> args = [];
++                for (int i = 0; i < o.SourcesCount; i++) args.Add(DescribeAddress(o.GetSource(i), depth - 1));
++                return $"{name}({string.Join(",", args)})";
++            }
++            return "undef";
++        }
++
+         private static uint PackCbSlotAndOffset(int cbSlot, int cbOffset)
+         {
+             return (uint)((ushort)cbSlot | ((ushort)cbOffset << 16));
+@@ -1065,6 +1146,246 @@
+             return GetBaseAddressCbWithOffset(src1, src2, constOffset);
+         }
+ 
++        // NX2NAVI: storage buffers whose address is a pointer the program loaded from another storage buffer get a slot
++        // of their own: SbCbSlot is PointerSlotFlag | the slot of the outer buffer's address, SbCbOffset its word offset
++        // (bits 0-9) | the pointer's byte offset in the outer buffer / 8 (bits 10-15). The host reads the pointer from
++        // the outer buffer when it binds the stage (tools/xlate/Program.cs writes the slot as "ptr" in res.json).
++        public const int PointerSlotFlag = 0x20;
++
++        private static Operand SkipCopies(Operand op)
++        {
++            while (op.AsgOp is Operation copy && copy.Inst == Instruction.Copy)
++            {
++                op = copy.GetSource(0);
++            }
++
++            return op;
++        }
++
++        // The terms of an integer sum (through Add and Copy), at most 16; false when there are more.
++        private static bool AddTerms(Operand op, List<Operand> terms)
++        {
++            op = SkipCopies(op);
++
++            if (op.AsgOp is Operation add && add.Inst == Instruction.Add)
++            {
++                return AddTerms(add.GetSource(0), terms) && AddTerms(add.GetSource(1), terms);
++            }
++
++            terms.Add(op);
++
++            return terms.Count <= 16;
++        }
++
++        // A term of an address that can be its base: a 64-bit-aligned constant buffer word outside c1 (patch 0020 says
++        // why), or the low half of a pointer loaded from a storage buffer (directly or back from where it was spilled).
++        private static bool TryGetBaseTerm(GtsContext gtsContext, Operand term, out PointerWord word)
++        {
++            return TryGetBaseTerm(gtsContext, term, out word, null);
++        }
++
++        // A phi is a base term when all its sources that are defined are the same one (phis it reaches again are
++        // part of a loop and say nothing): a pointer loaded in a branch or before a loop.
++        private static bool TryGetBaseTerm(GtsContext gtsContext, Operand term, out PointerWord word, HashSet<PhiNode> visited)
++        {
++            if (term.AsgOp is PhiNode phi)
++            {
++                visited ??= [];
++                visited.Add(phi);
++                bool any = false;
++                word = default;
++
++                for (int i = 0; i < phi.SourcesCount; i++)
++                {
++                    Operand source = SkipCopies(phi.GetSource(i));
++
++                    if (source.Type == OperandType.Undefined || (source.AsgOp is PhiNode seen && visited.Contains(seen)))
++                    {
++                        continue;
++                    }
++
++                    if (visited.Count > 16 || !TryGetBaseTerm(gtsContext, source, out PointerWord sourceWord, visited) ||
++                        (any && sourceWord != word))
++                    {
++                        return false;
++                    }
++
++                    word = sourceWord;
++                    any = true;
++                }
++
++                return any;
++            }
++
++            if (term.Type == OperandType.ConstantBuffer)
++            {
++                word = new PointerWord(term.GetCbufSlot(), term.GetCbufOffset(), -1);
++
++                return (word.Offset & 1) == 0 && word.Slot != 1;
++            }
++
++            if (gtsContext.PointerWords.TryGetValue(term, out word))
++            {
++                return true;
++            }
++
++            return term.AsgOp is Operation load &&
++                load.Inst == Instruction.Load &&
++                TryGetMemoryOffsets(load, out LsMemoryType type, out Operand baseOffset, out int constOffset) &&
++                gtsContext.TryGetPointerMemory(type, baseOffset, constOffset, out word);
++        }
++
++        private static bool TryGetPointerSum(GtsContext gtsContext, Operand value, out PointerWord word)
++        {
++            List<Operand> terms = [];
++            bool found = false;
++            word = default;
++
++            if (!AddTerms(value, terms))
++            {
++                return false;
++            }
++
++            foreach (Operand term in terms)
++            {
++                if (TryGetBaseTerm(gtsContext, term, out PointerWord candidate) && candidate.ByteOffset >= 0)
++                {
++                    if (found)
++                    {
++                        return false;
++                    }
++
++                    found = true;
++                    word = candidate;
++                }
++            }
++
++            return found;
++        }
++
++        private static bool IsHighTermOf(GtsContext gtsContext, Operand term, PointerWord low)
++        {
++            if (low.ByteOffset < 0)
++            {
++                return term.Type == OperandType.ConstantBuffer &&
++                    term.GetCbufSlot() == low.Slot &&
++                    term.GetCbufOffset() == low.Offset + 1;
++            }
++
++            return TryGetBaseTerm(gtsContext, term, out PointerWord high) &&
++                high.Slot == low.Slot &&
++                high.Offset == low.Offset &&
++                high.ByteOffset == low.ByteOffset + 4;
++        }
++
++        // NX2NAVI: the base of an address that FindUniqueBaseAddressCb does not see: its low word is a sum with exactly one
++        // term that can be a base (TryGetBaseTerm), anywhere in the sum (Ocarina's compute shaders add c0[0x110] to a
++        // sum of indices; its pointer tables give vertex, pixel and mesh shaders addresses like ptr + index * 16), and the
++        // high word is a sum with that base's high word as a term (an index or offset that happens to sit in c0 is not
++        // taken for a base). Inserts the offset from the base before the access.
++        private static SearchResult FindBaseInAddTree(
++            GtsContext gtsContext,
++            ResourceManager resourceManager,
++            IGpuAccessor gpuAccessor,
++            LinkedListNode<INode> node,
++            Operation operation)
++        {
++            List<Operand> terms = [];
++
++            if (operation.SourcesCount < 2 || !AddTerms(operation.GetSource(0), terms))
++            {
++                return SearchResult.NotFound;
++            }
++
++            List<Operand> highTerms = [];
++
++            if (!AddTerms(operation.GetSource(1), highTerms))
++            {
++                return SearchResult.NotFound;
++            }
++
++            Operand baseTerm = null;
++            PointerWord word = default;
++
++            foreach (Operand term in terms)
++            {
++                if (TryGetBaseTerm(gtsContext, term, out PointerWord candidate) &&
++                    highTerms.Exists(high => IsHighTermOf(gtsContext, high, candidate)))
++                {
++                    if (baseTerm != null)
++                    {
++                        return SearchResult.NotFound;
++                    }
++
++                    baseTerm = term;
++                    word = candidate;
++                }
++            }
++
++            if (baseTerm == null)
++            {
++                return SearchResult.NotFound;
++            }
++
++            int sbCbSlot = word.Slot;
++            int sbCbOffset = word.Offset;
++
++            if (word.ByteOffset >= 0)
++            {
++                if (word.Slot >= PointerSlotFlag || word.Offset >= 1 << 10 || (word.ByteOffset & 7) != 0 || word.ByteOffset >= 64 * 8)
++                {
++                    gpuAccessor.Log($"Pointer at byte {word.ByteOffset} of the buffer at c{word.Slot}[0x{word.Offset * 4:x}] has no storage buffer slot.");
++
++                    return SearchResult.NotFound;
++                }
++
++                if (!resourceManager.TryGetStorageBufferBinding(word.Slot, word.Offset, false, out int outerBinding))
++                {
++                    return SearchResult.NotFound;
++                }
++
++                sbCbSlot = PointerSlotFlag | word.Slot;
++                sbCbOffset = word.Offset | (word.ByteOffset / 8) << 10;
++
++                // The base is the pointer as the outer buffer holds it, loaded again here: the term may be a pointer
++                // advanced by an index, or a value whose load does not dominate this access.
++                baseTerm = EmitBefore(node, Instruction.Load, StorageKind.StorageBuffer,
++                    Const(outerBinding), Const(0), OuterWordOffset(gpuAccessor, node, word));
++            }
++
++            Operand offset = EmitBefore(node, Instruction.Subtract, StorageKind.None, operation.GetSource(0), baseTerm);
++
++            return new SearchResult(sbCbSlot, sbCbOffset, offset)
++            {
++                Base = word.ByteOffset >= 0 ? baseTerm : null,
++            };
++        }
++
++        private static Operand EmitBefore(LinkedListNode<INode> node, Instruction inst, StorageKind storageKind, params Operand[] sources)
++        {
++            Operand dest = Local();
++            node.List.AddBefore(node, new Operation(inst, storageKind, dest, sources));
++
++            return dest;
++        }
++
++        // The word index of a pointer's low half in the outer buffer, as GenerateInlineStorageOp addresses that buffer.
++        private static Operand OuterWordOffset(IGpuAccessor gpuAccessor, LinkedListNode<INode> node, PointerWord word)
++        {
++            Operand byteOffset = Const(word.ByteOffset);
++
++            if (gpuAccessor.QueryHasUnalignedStorageBuffer())
++            {
++                Operand outer = Cbuf(word.Slot, word.Offset);
++                Operand masked = EmitBefore(node, Instruction.BitwiseAnd, StorageKind.None, outer,
++                    Const(-gpuAccessor.QueryHostStorageBufferOffsetAlignment()));
++                Operand address = EmitBefore(node, Instruction.Add, StorageKind.None, outer, byteOffset);
++                byteOffset = EmitBefore(node, Instruction.Subtract, StorageKind.None, address, masked);
++            }
++
++            return EmitBefore(node, Instruction.ShiftRightU32, StorageKind.None, byteOffset, Const(2));
++        }
++
+         private static SearchResult FindBaseAddressCbFromMemory(GtsContext gtsContext, Operation operation, int constOffset, bool needsOffset)
+         {
+             if (operation != null)

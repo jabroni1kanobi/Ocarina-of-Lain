@@ -1,0 +1,327 @@
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+@@ -1820,6 +1820,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+ 
+         private static OperationResult GenerateLoadOrStore(CodeGenContext context, AstOperation operation, bool isStore)
+         {
++            if (IsGlobalStorageKind(operation.StorageKind))
++            {
++                return GenerateDeviceAddressLoadOrStore(context, operation, isStore);
++            }
++
+             SpvInstruction pointer = GetStoragePointer(context, operation, out AggregateType varType);
+ 
+             if (isStore)
+@@ -1834,10 +1839,137 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+             }
+         }
+ 
++        private static bool IsGlobalStorageKind(StorageKind storageKind)
++        {
++            return storageKind is StorageKind.GlobalMemory or
++                StorageKind.GlobalMemoryS8 or
++                StorageKind.GlobalMemoryS16 or
++                StorageKind.GlobalMemoryU8 or
++                StorageKind.GlobalMemoryU16;
++        }
++
++        // NX2NAVI: the device address table (Translation/Optimizations/GlobalToStorage.cs TryKeepDeviceAddressAccess), a
++        // storage buffer of 32-bit words the host keeps (runtime/vk_gpa.c):
++        //   words 0-1   the device address of a zeroed 4 KiB buffer, for addresses no page maps
++        //   word 2      the word index of the records
++        //   words 16..  65536 first-level entries, one per 16 MiB of the 40-bit GPU address space: the index of the
++        //               second-level block, 0 for none (block 0 stays zero)
++        //   word 65552  second-level blocks of 4096 entries, one per 4 KiB page: the record of the buffer that holds
++        //               the page, 0 for none
++        //   records     two words each, the buffer's device address minus its GPU address (low word first); the host
++        //               never changes a record a page names, so a page entry read at any time gives a whole one
++        // The pointer addresses the 32-bit word at the address's 4-byte-aligned word.
++        private static SpvInstruction GetDeviceAddressPointer(CodeGenContext context, int binding, SpvInstruction low, SpvInstruction high)
++        {
++            SpvInstruction u32 = context.TypeU32();
++            SpvInstruction u64 = context.TypeInt(64, 0);
++            SpvInstruction tableVar = context.StorageBuffers[binding];
++            SpvInstruction elemPtr = context.TypePointer(StorageClass.Uniform, u32);
++            SpvInstruction zero = context.Constant(context.TypeS32(), 0);
++
++            SpvInstruction Word(SpvInstruction index) => context.Load(u32, context.AccessChain(elemPtr, tableVar, zero, index));
++            SpvInstruction U(uint value) => context.Constant(u32, value);
++            SpvInstruction Wide(SpvInstruction lo, SpvInstruction hi) =>
++                context.BitwiseOr(u64, context.UConvert(u64, lo), context.ShiftLeftLogical(u64, context.UConvert(u64, hi), U(32)));
++
++            SpvInstruction inRange = context.ULessThan(context.TypeBool(), high, U(256));
++            SpvInstruction l1 = context.BitwiseOr(u32, context.ShiftLeftLogical(u32, high, U(8)), context.ShiftRightLogical(u32, low, U(24)));
++            l1 = context.Select(u32, inRange, l1, U(0));
++            SpvInstruction block = Word(context.IAdd(u32, l1, U(16)));
++            SpvInstruction page = context.BitwiseAnd(u32, context.ShiftRightLogical(u32, low, U(12)), U(0xfff));
++            SpvInstruction record = Word(context.IAdd(u32, context.IAdd(u32, context.IMul(u32, block, U(4096)), U(65552)), page));
++            SpvInstruction mapped = context.INotEqual(context.TypeBool(), record, U(0));
++            SpvInstruction recordWord = context.IAdd(u32, Word(U(2)), context.IMul(u32, record, U(2)));
++            SpvInstruction deltaLow = Word(recordWord);
++            SpvInstruction deltaHigh = Word(context.IAdd(u32, recordWord, U(1)));
++
++            SpvInstruction wordLow = context.BitwiseAnd(u32, low, U(0xfffffffc));
++            SpvInstruction device = context.IAdd(u64, Wide(wordLow, high), Wide(deltaLow, deltaHigh));
++            SpvInstruction dummy = context.IAdd(u64, Wide(Word(U(0)), Word(U(1))), context.UConvert(u64, context.BitwiseAnd(u32, low, U(0xffc))));
++            SpvInstruction address = context.Select(u64, mapped, device, dummy);
++
++            return context.ConvertUToPtr(context.TypePointer(StorageClass.PhysicalStorageBuffer, u32), address);
++        }
++
++        private static SpvInstruction LoadAligned(CodeGenContext context, SpvInstruction type, SpvInstruction pointer)
++        {
++            SpvInstruction load = context.Load(type, pointer, MemoryAccessMask.Aligned);
++            load.AddOperand((Spv.Generator.LiteralInteger)4);
++            return load;
++        }
++
++        private static void StoreAligned(CodeGenContext context, SpvInstruction pointer, SpvInstruction value)
++        {
++            SpvInstruction store = context.Store(pointer, value, MemoryAccessMask.Aligned);
++            store.AddOperand((Spv.Generator.LiteralInteger)4);
++        }
++
++        // Sources: the table binding, the address's low and high words, the value for a store. 8- and 16-bit accesses
++        // read the word and extract the bytes; their stores clear and set them with two atomics.
++        private static OperationResult GenerateDeviceAddressLoadOrStore(CodeGenContext context, AstOperation operation, bool isStore)
++        {
++            int binding = ((AstOperand)operation.GetSource(0)).Value;
++            SpvInstruction u32 = context.TypeU32();
++            SpvInstruction low = context.Get(AggregateType.U32, operation.GetSource(1));
++            SpvInstruction high = context.Get(AggregateType.U32, operation.GetSource(2));
++            SpvInstruction pointer = GetDeviceAddressPointer(context, binding, low, high);
++            StorageKind kind = operation.StorageKind;
++            int bits = kind is StorageKind.GlobalMemoryS8 or StorageKind.GlobalMemoryU8 ? 8
++                : kind is StorageKind.GlobalMemoryS16 or StorageKind.GlobalMemoryU16 ? 16 : 32;
++
++            if (bits == 32)
++            {
++                if (isStore)
++                {
++                    StoreAligned(context, pointer, context.Get(AggregateType.U32, operation.GetSource(operation.SourcesCount - 1)));
++                    return OperationResult.Invalid;
++                }
++
++                return new OperationResult(AggregateType.U32, LoadAligned(context, u32, pointer));
++            }
++
++            SpvInstruction shift = context.ShiftLeftLogical(u32, context.BitwiseAnd(u32, low, context.Constant(u32, bits == 8 ? 3u : 2u)), context.Constant(u32, 3));
++            SpvInstruction fieldMask = context.Constant(u32, bits == 8 ? 0xffu : 0xffffu);
++
++            if (isStore)
++            {
++                SpvInstruction value = context.BitwiseAnd(u32, context.Get(AggregateType.U32, operation.GetSource(operation.SourcesCount - 1)), fieldMask);
++                SpvInstruction mask = context.ShiftLeftLogical(u32, fieldMask, shift);
++                SpvInstruction scope = context.Constant(u32, 1);   // device
++                SpvInstruction semantics = context.Constant(u32, 0);
++                context.AtomicAnd(u32, pointer, scope, semantics, context.Not(u32, mask));
++                context.AtomicOr(u32, pointer, scope, semantics, context.ShiftLeftLogical(u32, value, shift));
++                return OperationResult.Invalid;
++            }
++
++            SpvInstruction word = LoadAligned(context, u32, pointer);
++
++            if (kind is StorageKind.GlobalMemoryS8 or StorageKind.GlobalMemoryS16)
++            {
++                SpvInstruction s32 = context.TypeS32();
++                SpvInstruction field = context.BitFieldSExtract(s32, context.Bitcast(s32, word), shift, context.Constant(u32, bits));
++                return new OperationResult(AggregateType.S32, field);
++            }
++
++            return new OperationResult(AggregateType.U32, context.BitwiseAnd(u32, context.ShiftRightLogical(u32, word, shift), fieldMask));
++        }
++
+         private static SpvInstruction GetStoragePointer(CodeGenContext context, AstOperation operation, out AggregateType varType)
+         {
+             StorageKind storageKind = operation.StorageKind;
+ 
++            // NX2NAVI: atomics on the device address table's pointers (GenerateDeviceAddressLoadOrStore covers loads and
++            // stores): sources are the table binding and the address's two words.
++            if (storageKind == StorageKind.GlobalMemory)
++            {
++                varType = AggregateType.U32;
++                return GetDeviceAddressPointer(
++                    context,
++                    ((AstOperand)operation.GetSource(0)).Value,
++                    context.Get(AggregateType.U32, operation.GetSource(1)),
++                    context.Get(AggregateType.U32, operation.GetSource(2)));
++            }
++
+             StorageClass storageClass;
+             SpvInstruction baseObj;
+             int srcIndex = 0;
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
+@@ -45,7 +45,18 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+ 
+             context.AddCapability(Capability.Shader);
+ 
+-            context.SetMemoryModel(AddressingModel.Logical, MemoryModel.GLSL450);
++            if (context.Properties.UsesDeviceAddresses)
++            {
++                // NX2NAVI: global memory through the device address table (Instructions.cs GetDeviceAddressPointer)
++                context.AddCapability(Capability.PhysicalStorageBufferAddresses);
++                context.AddCapability(Capability.Int64);
++                context.AddExtension("SPV_KHR_physical_storage_buffer");
++                context.SetMemoryModel(AddressingModel.PhysicalStorageBuffer64, MemoryModel.GLSL450);
++            }
++            else
++            {
++                context.SetMemoryModel(AddressingModel.Logical, MemoryModel.GLSL450);
++            }
+ 
+             context.AddCapability(Capability.GroupNonUniformBallot);
+             context.AddCapability(Capability.GroupNonUniformShuffle);
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -347,6 +347,15 @@ namespace Ryujinx.Graphics.Shader
+         {
+             return true;
+         }
++
++        /// <summary>
++        /// NX2NAVI: queries whether the host binds a device address table (GPU address pages to buffer device addresses)
++        /// for global memory accesses whose storage buffer the translator cannot find.
++        /// </summary>
++        bool QueryHostSupportsBufferDeviceAddress()
++        {
++            return false;
++        }
+         bool QueryHostSupportsShaderNonUniformIndexing()
+         {
+             return false;
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/ShaderProperties.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/ShaderProperties.cs
+@@ -19,6 +19,10 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+         public IReadOnlyDictionary<int, MemoryDefinition> LocalMemories => _localMemories;
+         public IReadOnlyDictionary<int, MemoryDefinition> SharedMemories => _sharedMemories;
+ 
++        // NX2NAVI: global memory operations go through the device address table (ResourceManager
++        // TryGetDeviceAddressTableBinding); the SPIR-V module uses the PhysicalStorageBuffer64 addressing model.
++        public bool UsesDeviceAddresses { get; set; }
++
+         public ShaderProperties()
+         {
+             _constantBuffers = new Dictionary<int, BufferDefinition>();
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+@@ -273,6 +273,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                             // The returned value being null means that the global memory replacement failed,
+                             // so we just make loads read 0 and stores do nothing.
+ 
++                            if (TryKeepDeviceAddressAccess(resourceManager, gpuAccessor, node, operation))
++                            {
++                                continue;
++                            }
++
+                             gpuAccessor.Log($"Failed to reserve storage buffer for global memory operation \"{operation.Inst}\".");
+ 
+                             if (operation.Dest != null)
+@@ -323,6 +328,51 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+             }
+         }
+ 
++        // NX2NAVI: a global access no storage buffer serves (its address is a pointer the program read from memory at an
++        // index, a phi of such pointers and constant buffer ones, or past the slots) stays a global access, with the device
++        // address table's binding as a new first source: the SPIR-V back end looks the address's page up in the table
++        // and accesses the buffer device address it gives (CodeGen/Spirv/Instructions.cs GetDeviceAddressPointer). An
++        // access the table cannot serve (a float atomic, which needs the loop of TryGenerateStorageOp) keeps the old
++        // fallback. The operation is replaced in place, so the pass goes on from the same node.
++        private static bool TryKeepDeviceAddressAccess(
++            ResourceManager resourceManager,
++            IGpuAccessor gpuAccessor,
++            LinkedListNode<INode> node,
++            Operation operation)
++        {
++            if (!gpuAccessor.QueryHostSupportsBufferDeviceAddress() ||
++                (operation.Inst & Instruction.FP32) != 0 ||
++                (operation.Inst & Instruction.Mask) == Instruction.AtomicCompareAndSwap && operation.StorageKind != StorageKind.GlobalMemory ||
++                operation.SourcesCount < 2 ||
++                (operation.StorageKind != StorageKind.GlobalMemory && operation.Inst.IsAtomic()) ||
++                !resourceManager.TryGetDeviceAddressTableBinding(out int binding))
++            {
++                return false;
++            }
++
++            Operand[] sources = new Operand[operation.SourcesCount + 1];
++            sources[0] = Const(binding);
++
++            for (int index = 0; index < operation.SourcesCount; index++)
++            {
++                sources[index + 1] = operation.GetSource(index);
++            }
++
++            Operand dest = operation.Dest;
++
++            for (int index = 0; index < operation.SourcesCount; index++)
++            {
++                operation.SetSource(index, null);
++            }
++
++            operation.Dest = null;
++            node.Value = new Operation(operation.Inst, operation.StorageKind, dest, sources);
++
++            gpuAccessor.Log($"Global memory operation \"{operation.Inst}\" goes through the device address table.");
++
++            return true;
++        }
++
+         private static bool IsGlobalMemory(StorageKind storageKind)
+         {
+             return storageKind is StorageKind.GlobalMemory or
+@@ -660,6 +710,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+             Queue<PhiNode> phis = new();
+             HashSet<PhiNode> visited = [];
+             List<uint> targetCbs = [];
++            bool unresolved = false;   // NX2NAVI: a phi source with no constant buffer base (a pointer from memory)
+ 
+             Operand globalAddress = operation.GetSource(0);
+ 
+@@ -714,9 +765,22 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                     {
+                         phis.Enqueue(phi2);
+                     }
++                    else if (phiSource.Type != OperandType.Undefined && phiSource.AsgOp is not PhiNode)
++                    {
++                        unresolved = true;
++                    }
+                 }
+             }
+ 
++            // NX2NAVI: with the device address table, an address that may come from a pointer the program read from memory
++            // goes through the table (the caller keeps it global): a range check against the constant buffer candidates
++            // would send it to one of them, or read 0.
++            if (gpuAccessor.QueryHostSupportsBufferDeviceAddress() && (targetCbs.Count == 0 || unresolved))
++            {
++                functionId = 0;
++                return false;
++            }
++
+             if (targetCbs.Count == 0)
+             {
+                 AddTableCandidates(resourceManager, operation.GetSource(0), targetCbs);
+--- a/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
+@@ -176,6 +176,22 @@ namespace Ryujinx.Graphics.Shader.Translation
+             return setAndBinding.Binding;
+         }
+ 
++        // NX2NAVI: the storage buffer slot of the device address table, with a constant buffer slot no program has
++        // (NVN banks are 0-17, GlobalToStorage.PointerSlotFlag is 0x20); tools/xlate/Program.cs writes it as "table".
++        public const int DeviceAddressTableCbSlot = 0x40;
++
++        public bool TryGetDeviceAddressTableBinding(out int binding)
++        {
++            if (!TryGetStorageBufferBinding(DeviceAddressTableCbSlot, 0, false, out binding))
++            {
++                return false;
++            }
++
++            Properties.UsesDeviceAddresses = true;
++
++            return true;
++        }
++
+         public bool TryGetStorageBufferBinding(int sbCbSlot, int sbCbOffset, bool write, out int binding)
+         {
+             if (!TryGetSbSlot((byte)sbCbSlot, (ushort)sbCbOffset, out int slot))

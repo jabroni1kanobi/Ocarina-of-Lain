@@ -1,0 +1,19 @@
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+@@ -960,11 +960,15 @@
+ 
+         private static Operand GenerateAtomicCasLoop(EmitterContext context, Operand wordOffset, int binding, Func<Operand, Operand> opCallback)
+         {
++            // NX2NAVI: each attempt reads the word with an atomic OR of 0, which returns its current value; a plain load
++            // could keep returning a stale cached copy (seen on AMD), so an invocation that lost the race never matched
++            // again and the loop did not end. The read stays inside the loop: this pass runs on SSA form, and the
++            // optimizer's copy propagation takes every value as assigned once, so no local can carry a value round it.
+             Operand lblLoopHead = Label();
+ 
+             context.MarkLabel(lblLoopHead);
+ 
+-            Operand oldValue = context.Load(StorageKind.StorageBuffer, binding, Const(0), wordOffset);
++            Operand oldValue = context.AtomicOr(StorageKind.StorageBuffer, binding, Const(0), wordOffset, Const(0));
+             Operand newValue = opCallback(oldValue);
+ 
+             Operand casResult = context.AtomicCompareAndSwap(

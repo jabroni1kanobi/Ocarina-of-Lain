@@ -1,0 +1,4 @@
+/* The icon (the Triforce, written by tools/make_launcher.py from launcher/ui/art.py triforce_ico into the build
+   folder, found through -I) and the manifest of NX2navi.exe and NX2navi-Setup.exe. */
+1 ICON "nx2navi.ico"
+1 24 "app.manifest"

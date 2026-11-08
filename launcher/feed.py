@@ -1,0 +1,144 @@
+"""Where updates come from.
+
+Every release carries NX2navi-update.json (tools/make_launcher.py writes it):
+
+    {"format": 1, "version": "0.3.11", "build": "0.3.11+abc1234", "notes": "...",
+     "app":     {"name": "NX2navi-app-0.3.11.zip", "size": n, "sha256": "..."},
+     "runtime": {"id": "py3.14.9-1", "name": "NX2navi-runtime-py3.14.9-1.zip", "size": n, "sha256": "..."},
+     "toolchain": "<lock digest>"}
+
+The feed (app/<version>/feed.json, or the player's override in settings) is either
+    {"type": "github", "repo": "owner/name"}   the newest GitHub release (or pre-release, on the preview channel)
+                                                  that has the manifest; a token reads a private repository
+    {"type": "url", "url": "https://.../NX2navi-update.json"}   one manifest; its files sit beside it
+"""
+import json
+import urllib.parse
+
+from . import net, versions
+
+MANIFEST = 'NX2navi-update.json'
+DEFAULT = {'type': 'github', 'repo': 'tangerineturtle1/NX2navi'}
+GITHUB_API = 'https://api.github.com'
+
+
+class FeedError(Exception):
+    pass
+
+
+class Release:
+    def __init__(self, manifest, notes='', page='', assets=None, headers=None, prerelease=False):
+        self.manifest = manifest
+        self.version = manifest['version']
+        self.build = manifest.get('build', self.version)
+        self.notes = (manifest.get('notes') or notes or '').strip()
+        self.page = page
+        self.assets = assets or {}       # name -> url
+        self.headers = headers or {}     # extra request headers for the asset urls (a private repository's token)
+        self.prerelease = prerelease
+
+    def asset(self, key):
+        """(url, headers, size, sha256) of the manifest's 'app' or 'runtime' file."""
+        entry = self.manifest.get(key)
+        if not entry:
+            raise FeedError(f'the {self.version} manifest has no {key} file')
+        url = self.assets.get(entry['name'])
+        if not url:
+            raise FeedError(f'the {self.version} release lacks {entry["name"]}')
+        return url, self.headers, entry.get('size'), entry.get('sha256')
+
+
+def load(layout, settings):
+    feed = dict(DEFAULT)
+    try:
+        if layout.feed_file.is_file():
+            feed.update(json.loads(layout.feed_file.read_text(encoding='utf-8')))
+    except (OSError, ValueError):
+        pass
+    if settings.get('feed_repo'):
+        feed = {'type': 'github', 'repo': settings['feed_repo']}
+    return feed
+
+
+def _check_manifest(m, where):
+    if not isinstance(m, dict) or m.get('format') != 1 or 'version' not in m or 'app' not in m:
+        raise FeedError(f'{where}: not an NX2navi update manifest')
+    versions.parse(m['version'])
+    return m
+
+
+def _github(feed, channel, token, version):
+    api = feed.get('api', GITHUB_API).rstrip('/')
+    headers = {'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+    try:
+        releases = net.get_json(f'{api}/repos/{feed["repo"]}/releases?per_page=20', headers, version=version)
+    except Exception as e:
+        code = getattr(e, 'code', None)
+        if code == 404:
+            raise FeedError(f'no releases found for {feed["repo"]} (a private repository needs a token)') from e
+        if code == 403:
+            raise FeedError('GitHub refused the request (rate limit); try again in an hour') from e
+        raise FeedError(f'GitHub could not be reached: {e}') from e
+    # The API lists the newest release first: the first one the channel takes that has a manifest is the answer.
+    for r in releases:
+        if r.get('draft') or (r.get('prerelease') and channel != 'preview'):
+            continue
+        assets = {a['name']: a for a in r.get('assets', [])}
+        if MANIFEST not in assets:
+            continue
+        if token:   # a private repository's files come through the API with the token
+            urls = {n: a['url'] for n, a in assets.items()}
+            asset_headers = {'Accept': 'application/octet-stream', 'Authorization': f'Bearer {token}'}
+        else:
+            urls = {n: a['browser_download_url'] for n, a in assets.items()}
+            asset_headers = {}
+        try:
+            m = _check_manifest(json.loads(net.get_bytes(urls[MANIFEST], asset_headers, version=version)),
+                                f'{r.get("tag_name")}/{MANIFEST}')
+        except (FeedError, ValueError, OSError) as e:
+            raise FeedError(f'{r.get("tag_name")}: {e}') from e
+        return Release(m, r.get('body') or '', r.get('html_url', ''), urls, asset_headers, bool(r.get('prerelease')))
+    return None
+
+
+def _url(feed, version):
+    url = feed['url']
+    try:
+        m = _check_manifest(net.get_json(url, version=version), url)
+    except FeedError:
+        raise
+    except Exception as e:
+        raise FeedError(f'{url}: {e}') from e
+    base = url.rsplit('/', 1)[0] + '/'
+    assets = {e['name']: urllib.parse.urljoin(base, e['name']) for e in (m.get('app'), m.get('runtime')) if e}
+    return Release(m, assets=assets)
+
+
+def latest(feed, channel='stable', token='', version='dev'):
+    """The newest release the feed offers on the channel, or None when it has none."""
+    if feed.get('type') == 'url':
+        return _url(feed, version)
+    if feed.get('type') == 'github':
+        return _github(feed, channel, token, version)
+    raise FeedError(f'unknown feed type {feed.get("type")!r}')
+
+
+def plain_notes(text, limit=12):
+    """Release notes as short lines for the window: markdown bullets and headings without their marks."""
+    out = []
+    for line in (text or '').splitlines():
+        s = line.strip()
+        if not s or s.startswith(('<!--', '```', '---')):
+            continue
+        s = s.lstrip('#').strip()
+        for mark in ('- ', '* ', '+ '):
+            if s.startswith(mark):
+                s = s[2:]
+        s = s.replace('**', '').replace('`', '')
+        if s:
+            out.append(s)
+        if len(out) >= limit:
+            break
+    return out

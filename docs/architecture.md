@@ -1,0 +1,114 @@
+# Architecture
+
+How the Switch 2 build of *Ocarina of Time* (game version 1.1.1) becomes a native Windows x86-64 program. Code taken
+from other projects, with its license, is listed in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
+
+## Pipeline
+
+### 1. Input
+
+- The ExeFS and RomFS of the user's own dump. Everything extracted or generated stays under `build/`, `generated/` or
+  the user's own folders, never in the repository (`tools/check_content.py`).
+
+### 2. CPU: lift ARM64 to C
+
+- Modules: `main`, `sdk` and the `subsdk*` modules. `rtld` is dropped; the host links the modules.
+- A hand-written decoder (`recomp/lifter.py`) and NEON/FP lowering (`recomp/simd_c.py`, `runtime/simd.h`) emit one C
+  function per guest function, direct calls for `BL` and an address-keyed table for indirect branches.
+  - The generator runs in parallel processes, with bounded memory per worker.
+  - Jump tables are resolved by a symbolic pass of our own (`recomp/jumptables.py`).
+  - `LDXP`/`STXP` (128-bit exclusive pairs) are supported.
+  - NZCV and the six most used general registers of each function live in C locals instead of the `Cpu`
+    (`recomp/flags.py`, `recomp/regs.py`): registers are stored back where they changed, before calls, SVCs and
+    exits, and reloaded after them. A call reloads only X0-X18 and X30, as AAPCS64 has the callee preserve X19-X29
+    and SP; `gen.py --no-callee-saved-trust` reloads those too.
+- Memory: guest address equals host address, all below 2^39 (IPC encodes 39-bit addresses). The heap, stacks and the
+  alias region are reserved with `MEM_WRITE_WATCH`, so the graphics back end can ask which pages the CPU wrote since
+  the last upload (`runtime/memory.c`).
+- Indirect branches go through `rt_dispatch` (`runtime/dispatch.c`), which looks the target up in the address table
+  and tail-calls it.
+- Testing: a differential harness checks every lifted instruction class against Unicorn (test-only, never linked into
+  the game).
+
+### 3. Host
+
+- The SDK boundary is at the `nn::*` function level: threads and synchronisation, IPC, memory, fs/RomFS, time,
+  account, applet, hid, audio renderer and effects run as host code. Only `audren:u` and `sm:` are real IPC services.
+- Window, keyboard and mouse: Win32 (`gfx_window_win.c`, `input_win.c`). Gamepads and audio output: SDL3 (every
+  connected gamepad is open; the game reads the one pressed last, `input.c`). Voice: libopus. Movies: a host VP9
+  decoder over libvpx replaces the SDK's `movie::Decoder` (`runtime/ov_movie.c`).
+- Settings and menu: every key with its default is in one table (`cfg.c`), read from `nx2navi.ini` and `NX2NAVI_*`
+  variables and written back when the in-game menu changes it. The menu and the performance overlay are Dear ImGui,
+  drawn into the swapchain image (`runtime/ui/`); their text is in `ui_text.c`.
+- OS calls the host makes go through `runtime/platform/` (`platform.h`, `win32.c`).
+
+#### Threads and cores
+
+Every guest thread is a host thread. The game assumes Horizon's scheduler: three application cores, a thread runs
+only on a core in its affinity mask, and a higher-priority thread takes a core from a lower-priority one. The game
+keeps per-core data without locks and relies on that, so the host models it (`runtime/kernel.c`):
+
+- Three virtual cores. A guest thread runs guest code only while it holds a core; the others wait in a
+  priority-ordered list.
+- Preemption. When a waiting thread has a better priority than a holder on a core it may use, exactly one holder is
+  flagged. The holder checks the flag at its next SVC and at every indirect call (`rt_dispatch`), checks again under
+  the kernel lock that a better thread still waits, and only then hands its core over.
+- Asynchronous preemption (on unless `NX2NAVI_ASYNC_PREEMPT=0`): a waiter that has spun 250 us suspends the holder
+  and, if its host rip is in lifted code at host depth 0, moves it to `kern_ap_stub`, which saves the volatile
+  registers and gives the core up there. A holder of a guest mutex counts at the priority of its best waiter, and one
+  inside an SDK spin lock is not preempted.
+- Host work gives the core back. Queue submits, presents, GPU waits, shader translation, `nn::fs` calls and NVN memory
+  pool setup run without a core (`NVN_BLOCKING`, `kern_core_away`).
+- Spin waits. Loops that only another thread can end send their back-edges through `rt_spin_gate`, which pauses the
+  core once per pass and hands it to a waiter after 50 us of polling (`NX2NAVI_SPIN`, `NX2NAVI_SPIN_HANDOFF_US`).
+
+### 4. Graphics
+
+- NVN 2 front end (`nvn_api_*.c`, `nvn_obj.h`, texture layout and deswizzle, the Switch 2 GOB layout). The game
+  records command buffers through it; nothing reaches the GPU until the game submits.
+- Vulkan 1.3 back end. At `QueueSubmitCommands` the recorded NVN commands are replayed into Vulkan command buffers on
+  the submitting thread (`vk_exec*.c`); a recorder thread makes the `vkCmd*` calls from a ring of packets
+  (`vk_rec.c`).
+- Memory pools are imported as host memory (`VK_EXT_external_memory_host`). On a discrete GPU, pools bound as buffers
+  are mirrored in device-local memory and the pages the CPU wrote (write watch) plus the ranges the game flushes are
+  uploaded before a replay (`vk_memory.c`); without the mirrors the GPU reads them over PCIe and Kokiri Forest runs at
+  7 fps. GPU-rendered textures are written back when the CPU reads them.
+- Uniform snapshot. The game rewrites per-object uniform blocks soon after it submits the frame that reads them; at
+  the start of a submission's replay every uniform range it binds from CPU-written pools is copied, and the draws bind
+  the copy (`vk_usnap.c`).
+- Driver data. The NVN driver keeps a per-stage constant bank (c0). The back end fills it as the driver does: storage
+  and uniform tables, push constants and, for NVN 2 compute, the dispatch's group counts in bytes 0-0xb.
+- Storage buffers the shaders reach through pointer tables in memory are bound at the address the table holds
+  (`GfxShaderRes.ptr`, `vk_exec_draw.c ptr_addr`).
+- Bindless textures: the texture and sampler pools are descriptor arrays kept in step with the game's pool writes
+  (`vk_exec_draw.c pool_sync`); slots that resolve alike share one lookup.
+- Shaders: Ampere (SM86) code is lowered to Maxwell (`tools/xlate/AmpereLowering.cs`) and translated to SPIR-V by the
+  pinned shader translator (`tools/vendor/ryujinx`, 1.3.2) with our patches (`tools/xlate/patches/`), built with .NET 10 NativeAOT as
+  `nx2navi_xlate.exe` and run as separate processes. Translations are cached on disk; shaders and pipelines seen in
+  play are prepared at the next boot. The game waits for all of it (`runtime/boot.c` `boot_wait`): about half a second
+  when warm; after a translator, GPU or driver change a "Preparing shaders" screen shows the progress (`ui/menu.cpp`
+  `menu_boot_frame`). `NX2NAVI_PREWARM_WAIT_MS` caps the wait, after which the rest finishes in the background.
+- Mesh and task shaders run as `VK_EXT_mesh_shader`; indirect mesh draws read NVN's `{count, first}` record through a
+  ring of Vulkan `{x, y, z}` records filled on the GPU.
+- Pipelines: `VK_EXT_graphics_pipeline_library` where the driver has it: stage libraries compiled ahead, a fast link
+  at a new state, an optimised pipeline replacing it from a background thread. A draw whose pipeline is not ready is
+  skipped when one of its pass's targets was rendered in the previous frame, and waits otherwise. Compute pipelines
+  are compiled outside the pipeline lock, and one compile serves every thread that needs it.
+- The game's tensor-core upscaler is replaced by a decode-and-scale pass (`vk_tonemap.c`); `vk_fsr.c` runs AMD FSR 1
+  (EASU, RCAS) on the present when the window is larger than the picture.
+- ASTC textures are uploaded as they are where the device samples ASTC, and decoded by a compute shader everywhere
+  else (`vk_astc.c`); under 20 GiB of video memory the decoder encodes them to BC3.
+- Occlusion queries never block the CPU; a result that is not ready counts as visible.
+- Allocation: Vulkan Memory Allocator. Debugging: Vulkan validation layers, per-pass frame dumps (`NX2NAVI_DUMP`,
+  `vk_dump.c`), a sampling profiler (`NX2NAVI_PROFILE`, `tools/prof_report.py`) and a flight recorder
+  (`NX2NAVI_FLIGHT`). RenderDoc cannot capture, because it hides `VK_EXT_external_memory_host` from the application.
+
+Maxwell behaviour the back end has to match: [maxwell.md](maxwell.md).
+
+### 5. Toolchain
+
+- Generated C: MSYS2 UCRT64 Clang + LLD. The generated code uses GNU extensions (`__int128`, `musttail`, vector
+  types) that `cl.exe` cannot compile.
+- Host code: the same Clang, C11.
+- Builds write a Ninja file and run MSYS2 Ninja. Every object is hashed before linking, because a faulty RAM module
+  once flipped bits in stored objects.

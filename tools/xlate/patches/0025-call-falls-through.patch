@@ -1,0 +1,14 @@
+--- a/src/Ryujinx.Graphics.Shader/Decoders/Decoder.cs
++++ b/src/Ryujinx.Graphics.Shader/Decoders/Decoder.cs
+@@ -500,7 +500,10 @@
+ 
+         public static bool IsUnconditionalBranch(ref InstOp op)
+         {
+-            return IsUnconditional(ref op) && op.Props.HasFlag(InstProps.Bra);
++            // NX2NAVI: a call returns to the next instruction, so the block after a CAL is its successor. Taken for
++            // a branch, that block lost its only predecessor and was dropped (AmpereLowering emits CAL for SM86
++            // CALL/RET; Ocarina's culling writes its draw lists after one).
++            return IsUnconditional(ref op) && op.Props.HasFlag(InstProps.Bra) && op.Name != InstName.Cal;
+         }
+ 
+         private static bool IsUnconditional(ref InstOp op)

@@ -1,0 +1,44 @@
+name: Performance problem
+description: Low frame rate, stutter or long loading.
+labels: [performance]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The title line of the settings menu (F1).
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: CPU, GPU, driver, RAM and Windows version
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens, and where
+      description: The frame rate you see (performance overlay, F10), the place in the game, and whether it is constant or in bursts. A screenshot with the full overlay on helps.
+    validations:
+      required: true
+  - type: dropdown
+    id: first
+    attributes:
+      label: Only on the first start?
+      description: The first start after an install, a game update or a driver update prepares shaders and can stutter for a while.
+      options:
+        - "No, it happens every time"
+        - "Yes, only on the first start"
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: Settings changed from the defaults
+      description: Window size, scaling, widescreen, frame rate limit, presentation, or "none".
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Drag `logs\nx2navi.log` from the game's folder into this field.

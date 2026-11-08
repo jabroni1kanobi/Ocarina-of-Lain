@@ -1,0 +1,3 @@
+/* The icon of NX2navi-Setup.exe: runtime/nx2navi.ico, the icon of nx2navi.exe. tools/make_release.py compiles this file with
+   llvm-windres -I runtime and links it with launcher.c. */
+1 ICON "nx2navi.ico"

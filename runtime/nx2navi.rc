@@ -1,0 +1,5 @@
+/* The application manifest of nx2navi.exe (nx2navi.manifest) and its icon (nx2navi.ico, also the icon of NX2navi-Setup.exe and of
+   the installer window). tools/build_game.py compiles it with the runtime objects, so it is also a member of
+   libnx2navirt.a, which the release links with --whole-archive. */
+1 24 "nx2navi.manifest"
+1 ICON "nx2navi.ico"

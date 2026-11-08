@@ -1,0 +1,6 @@
+# Packages of the launcher release's bundled Python 3.14.9 (tools/make_launcher.py): what the launcher and
+# tools/make_game.py import. numpy: recomp/gen.py and the window's drawing (launcher/ui/art.py). lz4: NSO segments.
+# zstandard: tools/nup.py. zbic is not bundled: the launcher downloads it from PyPI on the player's PC.
+numpy==2.5.4
+lz4==4.4.5
+zstandard==0.25.0

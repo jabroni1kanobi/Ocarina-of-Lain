@@ -1,0 +1,111 @@
+# Controls
+
+Input comes from SDL3 gamepads, the keyboard and the mouse, merged into one Switch controller (`runtime/input.c`,
+`runtime/input_win.c`). Every connected gamepad is kept open and the game reads the one pressed last; a gamepad
+switched on in play is found within a second. Buttons are ORed; each stick takes the source with the larger
+deflection. Keys and mouse buttons count only while the game window is in the foreground. `NX2NAVI_INPUT=none`
+disables both (automated runs). `NX2NAVI_*` settings can also be set in `nx2navi.ini` next to the exe (`input = none`,
+`motion = 0`, `rumble = 0`); the environment overrides the file. `NX2NAVI_RUMBLE_STRENGTH` is the rumble strength in
+percent (0 to 300, default 130; 0 is the same as `rumble = 0`). `NX2NAVI_RUMBLE_CURVE` is the exponent applied to the
+amplitude before the strength (0.2 to 1.5, default 0.6; lower makes weak pulses stronger, 1 is linear).
+`NX2NAVI_RUMBLE_TRIGGERS=1` also drives the impulse triggers of an Xbox pad.
+
+`NX2NAVI_PAD_LAYOUT` (`pad_layout`, the *Button layout* row on the Controls tab, live) picks which face button is Switch A:
+
+- `nintendo`: by position, as on a Switch (the table below).
+- `xbox`: south A, east B, west X, north Y, as an Xbox pad labels them; on a PlayStation pad cross is A, circle B, square X, triangle Y.
+- `auto` (default): `nintendo` for a pad whose east button SDL reports labelled A (Switch Pro Controller, Nintendo-layout pads), `xbox` for the others.
+
+The log names the layout in effect (`input: gamepad layout ...`) and each gamepad's first press
+(`input: gamepad "...": first press`); the menu shows the layout under *Automatic*. The game's prompts show the Switch
+letters.
+
+The actions are the game's own, as its *Basic Controls* screen (Plus menu, System) names them:
+
+| Switch | Gamepad (by position, Nintendo layout) | Keyboard and mouse | Action in the world |
+|---|---|---|---|
+| Left stick | left stick | W A S D | move |
+| Right stick | right stick | mouse; arrow keys as a second source | camera |
+| A | east | E, Left Shift | actions (talk, open, pick up, climb, grab); held, dash |
+| B | south | Left Ctrl, Backspace | put away, cancel, back |
+| X | north | Space | jump |
+| Y | west | left mouse button | attack with the sword |
+| ZL | left trigger (over 50%) | right mouse button, Z | target (hold or toggle, the game's *Targeting Type* option) |
+| ZR | right trigger (over 50%) | F, X | use the selected item (slingshot, bow, boomerang, hookshot, bombs, bottles) |
+| L | left shoulder | Q | quick-select items; previous page in the game's menus |
+| R | right shoulder | R | quick-select items; next page in the game's menus |
+| Left stick click | left stick click | V | (not on the game's controls screen) |
+| Right stick click | right stick click | C, middle mouse button | reset the camera behind Link |
+| D-pad left | D-pad left | 1, O | play the ocarina |
+| D-pad up | D-pad up | 2 | put the accessory on or take it off |
+| D-pad right | D-pad right | 3, N | talk to Navi |
+| D-pad down | D-pad down | 4 | change boots |
+| Plus | Start | Tab | menu: items, equipment, collection, system |
+| Minus | Back | M | map |
+
+The game's *Swap Jump Controls* option trades B and X (jump on B, put away on X); the bindings stay on the Switch buttons, so Space then puts away and Left Ctrl jumps. Left Shift is A, so holding it dashes; E presses A once for talking and opening. Esc is unbound in the game; it opens the settings menu and releases the mouse cursor (see Mouse camera). Z and X duplicate ZL and ZR on neighbouring keys. The mouse wheel is unbound. The bindings are the tables of `input_map` in `runtime/input_map.c`: the keys (platform-neutral key ids) and one gamepad table per layout (gamepad inputs by position); `runtime/input_win.c` translates Win32 virtual keys and SDL buttons.
+
+## Window keys
+
+| Key | Gamepad | Action |
+|---|---|---|
+| F1 or Esc | Minus and Plus together | open or close the settings menu; the game gets no input while it is open |
+| F10 | L3 + R3 (both stick clicks) | performance overlay: off, frame rate, full panel |
+| F11 | | borderless fullscreen on or off, saved to `nx2navi.ini` |
+
+The Minus+Plus combo never reaches the game. In the menu the arrow keys, the D-pad or the left stick move, Enter or A selects, Q and E or L and R switch tabs, Esc or B goes back (Switch button names, as in the table above).
+
+## Remapping
+
+The *Controls* tab of the settings menu lists, under the button layout, every Switch button and the eight stick directions the keys drive (movement and camera), each with two key cells and a controller cell. Each row's description says what the button does in the game. Select a cell, press A or Enter, then press the new key, mouse button or controller button; Esc or five seconds without a press cancel, and a controller button cancels a key cell. Delete, Backspace or X clears the selected cell. A key another action has moves to the new one (the description names the action it left); a controller button swaps with the one it replaces. A remapped controller button is physical: from then on the face buttons (A B X Y) stay where they are in both layouts, until the buttons are put back as the layout in use has them or *Reset all buttons* is chosen. F1, F8, F10, F11 and Esc cannot be bound (the menu, the flight recorder and the window keep them). Punctuation keys are named by their place on a US keyboard; the menu shows the character the keyboard layout in use puts there.
+
+The tab writes `nx2navi.ini` lines, one per Switch button or stick direction: `bind_<button> = <entry>, <entry>, ...`. The button is `A B X Y L R ZL ZR PLUS MINUS LEFT UP RIGHT DOWN LCLICK RCLICK`, or a stick direction `LSTICK_LEFT LSTICK_UP LSTICK_RIGHT LSTICK_DOWN` (movement, W A S D by default) and `RSTICK_...` (camera, the arrow keys). An entry is `pad:<name>` or `key:<name>`:
+
+- pad names: `south east west north l r zl zr start back lstick rstick dpad_left dpad_up dpad_right dpad_down lpaddle1 rpaddle1 lpaddle2 rpaddle2` (`zl`, `zr` are the triggers; the paddles are the back buttons of an Xbox Elite, DualSense Edge or Steam Controller, upper pair 1, lower pair 2, and no Switch button has them by default)
+- key names: `a` to `z`, `0` to `9`, `f2` to `f7`, `f9`, `f12`, `num0` to `num9`, `space tab enter backspace lshift rshift lctrl rctrl lalt capslock insert delete home end pageup pagedown up down left right`, `num_add num_sub num_mul num_div num_decimal`, `minus equals lbracket rbracket semicolon apostrophe comma period slash backslash grave`, `mouse_l mouse_r mouse_m mouse_x1 mouse_x2`
+- `key:default` and `pad:default` keep that part's defaults (`pad:default` is each layout's own button).
+- `none` leaves the button unbound.
+
+A line replaces every default of that button, pad and keyboard, so list the keys you still want or use `key:default`. Pad names are physical positions, so a line means the same in both layouts and replaces the layout's own button for that Switch button. Stick directions take keys only: the controller's sticks and the mouse camera always work. Buttons without a line keep the table above. Names are case-insensitive. An invalid entry logs one `input: bind ...` line and is skipped; a line without a valid entry changes nothing. The `NX2NAVI_BIND_<button>` environment variables work like any other setting. A changed line applies at once (`runtime/input.c` builds the tables again at its next poll).
+
+A pad that reports its face buttons swapped (A/B and X/Y, as some GuliKit models do) is fixed with:
+
+```
+bind_A = pad:south, key:default
+bind_B = pad:east, key:default
+bind_X = pad:west, key:space
+bind_Y = pad:north, key:mouse_l
+```
+
+## Mouse camera
+
+Mouse motion (raw input) becomes right-stick deflection. Each presented frame takes the counts moved since the last frame, divides by the frame time and sets the deflection to `counts per second * NX2NAVI_MOUSE_SENS / 3000` of full, held for that frame, so the turn rate does not depend on the frame rate. This is not mouselook: the game's stick curve and dead zone still apply, so very slow movements do nothing and a fast flick saturates. The mouse deflection competes with the gamepad and arrow keys by the larger-deflection rule.
+
+`NX2NAVI_MOUSE_SENS` (0 to 10, default 1; higher turns faster, 0 turns the mouse camera and the cursor capture off). While the window is the foreground window the cursor is hidden and confined to the client area. It is released on focus loss, minimise, while F11 changes the window, during a size or move loop and while a text entry is open. Esc releases it by hand: the cursor shows, the mouse camera and mouse buttons stop, and the window can be moved, minimised or closed. A mouse click inside the client area captures it again; that click does not reach the game. Activating the window by a click on its title bar or border does not capture, so it can be dragged or closed right away; Alt+Tab or a click in the client area captures as before. `NX2NAVI_INPUT=none` disables the capture too.
+
+`NX2NAVI_STICK_DEADZONE` (0 to 50, default 8) is the gamepad stick dead zone in percent of full deflection, the same for both sticks. It is round: a stick inside the circle reads centred, and the rest of its travel is scaled to start at 0 at the edge, so full deflection still reaches full. Raise it for a stick that drifts. The game's own dead zone applies after it. `NX2NAVI_LSTICK_DEADZONE` and `NX2NAVI_RSTICK_DEADZONE` (the *Left/Right stick dead zone* rows under *Analog sticks* on the Controls tab) set one stick each and fall back to `NX2NAVI_STICK_DEADZONE` while unset, so a worn stick can get a larger zone than the other. With a gamepad connected each row shows its stick's deflection now, before the dead zone (*stick now*): let go of the stick and set the row a few percent above the value it rests at.
+
+The stick direction bits (`StickLLeft` to `StickRDown`) are derived from the sticks at 50% deflection. With no gamepad connected the log says `input: no gamepad`.
+
+## Nintendo Switch 2 controllers
+
+Windows does not present the Switch 2 Pro Controller as a gamepad SDL can open (the log says `input: no gamepad`), so it needs a bridge program that wakes it and creates a virtual gamepad, for example one that emulates a DualSense: that gives buttons, rumble, gyro and accelerometer. The log then shows `input: gamepad "DualSense Wireless Controller" ... (rumble, gyro and accelerometer, ...)` and `input: motion sensors on`. Bridges that output a DualShock 4 whose gyro and accelerometer never change give buttons and rumble but no motion. Run one bridge at a time; Steam Input can also claim the controller, so close Steam if the bridge does not find it. With several virtual and real gamepads connected the game follows whichever one is pressed.
+
+## Scripted input
+
+`NX2NAVI_INPUT_SCRIPT=<file>` replays presses. It is ORed with real input and still applies under `NX2NAVI_INPUT=none`. One event per line, `#` starts a comment:
+
+```
+<frame> <button> [hold_frames]            # A B X Y L R ZL ZR PLUS MINUS LEFT UP RIGHT DOWN LCLICK RCLICK; hold defaults to 4
+<frame> LSTICK|RSTICK <x> <y> [hold_frames]   # -32767..32767, up is +y
+```
+
+`<frame>` counts 60 Hz ticks of game time since the first frame (presented frames at 60 fps). Each event logs once (`input: script frame N tick T: A`).
+
+`NX2NAVI_INPUT_RECORD=<file>` (`input_record` in `nx2navi.ini`) writes the merged input in the same format, one line per button press and per stick segment. The file replays as a script, which makes it the repro to attach to a bug report.
+
+`NX2NAVI_TEST_PAD=<lx>,<ly>,<rx>,<ry>` attaches an SDL virtual gamepad at start whose sticks rest at these raw SDL axis values (-32768 to 32767, down is +y), so a drifting or held stick can be tested without a controller: the values go through the gamepad mapping and `NX2NAVI_STICK_DEADZONE` like a real pad's, and `NX2NAVI_INPUT_RECORD` shows what reached the game. `NX2NAVI_TEST_PAD_AT=<ms>` attaches it that long after input starts instead and presses its south button a second later, which tests a controller switched on in play.
+
+## RenderDoc capture (blocked)
+
+`NX2NAVI_RDOC=<frame>[,...]` (`runtime/rdoc_win.c`; `NX2NAVI_RDOC_DIR`, `NX2NAVI_RDOC_DLL`) loads RenderDoc before `vkCreateInstance`. RenderDoc hides `VK_EXT_external_memory_host`, which the back end requires for guest pool imports (`runtime/vk_memory.c`), so device creation fails under it. A capture needs a copy-based pool fallback first.

@@ -1,0 +1,192 @@
+"""What the launcher needs from the operating system: crisp drawing on scaled displays, the game's fonts for this
+process only, starting the game and the stub, shortcuts, the uninstall entry and a gamepad. Windows first; the
+other branches exist so the window can be developed and tested on Linux."""
+import ctypes
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+CREATE_NO_WINDOW = 0x08000000
+DETACHED_PROCESS = 0x00000008
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+UNINSTALL_KEY = r'Software\Microsoft\Windows\CurrentVersion\Uninstall\NX2navi'
+
+
+def dpi_aware():
+    """Draw at the display's real resolution instead of letting Windows stretch a 96-dpi window (blurry)."""
+    if os.name != 'nt':
+        return
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
+
+
+def app_id():
+    """Group the window under the launcher's own taskbar icon rather than python's."""
+    if os.name == 'nt':
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('NX2navi.Launcher')
+        except (AttributeError, OSError):
+            pass
+
+
+def register_font(path):
+    """Make a font file usable by this process only (Tk then finds it by family name). True on success."""
+    path = str(path)
+    if os.name == 'nt':
+        try:
+            return ctypes.windll.gdi32.AddFontResourceExW(ctypes.c_wchar_p(path), 0x10, None) > 0   # FR_PRIVATE
+        except (AttributeError, OSError):
+            return False
+    try:
+        fc = ctypes.CDLL('libfontconfig.so.1')
+        fc.FcConfigAppFontAddFile.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        return bool(fc.FcConfigAppFontAddFile(None, path.encode()))
+    except OSError:
+        return False
+
+
+def open_path(path):
+    path = str(path)
+    if os.name == 'nt':
+        os.startfile(path)   # noqa: S606 — opens a folder in Explorer
+    else:
+        subprocess.Popen(['xdg-open', path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def start_game(exe):
+    """Start the game from its own folder; returns the process to watch."""
+    exe = Path(exe)
+    flags = {'creationflags': CREATE_NEW_PROCESS_GROUP} if os.name == 'nt' else {'start_new_session': True}
+    return subprocess.Popen([str(exe)], cwd=str(exe.parent), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, close_fds=True, **flags)
+
+
+def start_detached(cmd, cwd=None):
+    flags = {'creationflags': DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP} if os.name == 'nt' \
+        else {'start_new_session': True}
+    subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     close_fds=True, **flags)
+
+
+def restart(layout, args=()):
+    """Start the launcher again through its stub (which swaps in a staged Python and starts app/current.txt's
+    version). False in a checkout, which has no stub."""
+    if not layout.stub.is_file():
+        return False
+    start_detached([str(layout.stub), *args], cwd=str(layout.root))
+    return True
+
+
+def stub_run(layout, args, timeout=30):
+    """Run the stub for one of its own commands (shortcuts); True when it succeeded."""
+    if not layout.stub.is_file():
+        return False
+    flags = {'creationflags': CREATE_NO_WINDOW} if os.name == 'nt' else {}
+    try:
+        return subprocess.run([str(layout.stub), *args], timeout=timeout, capture_output=True, **flags).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def desktop_shortcut(layout, enable):
+    return stub_run(layout, ['--desktop-shortcut', 'on' if enable else 'off'])
+
+
+def keep_awake(on):
+    if os.name != 'nt':
+        return
+    try:
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0))
+    except (AttributeError, OSError):
+        pass
+
+
+def uninstall(layout, remove_game='', log=print):
+    """Remove the shortcuts, the uninstall entry and, once this process has exited, the launcher's folder (and the
+    game folder when remove_game names it). Saves inside a kept game folder stay."""
+    stub_run(layout, ['--shortcuts', 'off'])
+    if os.name == 'nt':
+        try:
+            import winreg
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY)
+        except OSError:
+            pass
+        targets = [str(layout.root)] + ([str(remove_game)] if remove_game else [])
+        if layout.toolchain.parent != layout.root:
+            targets.append(str(layout.toolchain.parent))
+        script = 'ping -n 3 127.0.0.1 >nul & ' + ' & '.join(f'rmdir /s /q "{t}"' for t in targets)
+        start_detached(['cmd.exe', '/c', script], cwd=os.environ.get('TEMP', 'C:\\'))
+    else:
+        log('uninstall: remove these folders yourself: ' + ', '.join([str(layout.root), str(remove_game)]))
+
+
+# ---------------------------------------------------------------- gamepad (XInput)
+
+class _XInputGamepad(ctypes.Structure):
+    _fields_ = [('wButtons', ctypes.c_ushort), ('bLeftTrigger', ctypes.c_ubyte), ('bRightTrigger', ctypes.c_ubyte),
+                ('sThumbLX', ctypes.c_short), ('sThumbLY', ctypes.c_short), ('sThumbRX', ctypes.c_short),
+                ('sThumbRY', ctypes.c_short)]
+
+
+class _XInputState(ctypes.Structure):
+    _fields_ = [('dwPacketNumber', ctypes.c_uint), ('Gamepad', _XInputGamepad)]
+
+
+BUTTONS = {0x0001: 'up', 0x0002: 'down', 0x0004: 'left', 0x0008: 'right', 0x1000: 'a', 0x2000: 'b', 0x8000: 'y',
+           0x4000: 'x', 0x0010: 'start'}
+
+
+class Gamepad:
+    """Polls the first XInput pad; poll() returns the buttons pressed since the last call (edges), the left stick
+    counted as the d-pad."""
+
+    def __init__(self):
+        self.dll = None
+        self.held = set()
+        if os.name == 'nt':
+            for name in ('xinput1_4', 'xinput1_3', 'xinput9_1_0'):
+                try:
+                    self.dll = getattr(ctypes.windll, name)
+                    break
+                except (AttributeError, OSError):
+                    continue
+
+    def poll(self):
+        if not self.dll:
+            return set()
+        st = _XInputState()
+        down = set()
+        for pad in range(4):
+            try:
+                if self.dll.XInputGetState(pad, ctypes.byref(st)) == 0:
+                    g = st.Gamepad
+                    down = {name for bit, name in BUTTONS.items() if g.wButtons & bit}
+                    if g.sThumbLY > 16000:
+                        down.add('up')
+                    elif g.sThumbLY < -16000:
+                        down.add('down')
+                    if g.sThumbLX > 16000:
+                        down.add('right')
+                    elif g.sThumbLX < -16000:
+                        down.add('left')
+                    break
+            except OSError:
+                return set()
+        pressed = down - self.held
+        self.held = down
+        return pressed
+
+
+def is_windows():
+    return os.name == 'nt'
+
+
+def frozen_python():
+    return Path(sys.executable).parent

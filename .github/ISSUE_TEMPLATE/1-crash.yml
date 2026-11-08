@@ -1,0 +1,69 @@
+name: Crash
+description: The game closes, freezes or shows a FATAL message.
+labels: [bug, crash]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search the open and closed issues for this crash first.
+
+        Do not attach or link game files, keys, firmware or builds. Issues that do are closed.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The title line of the settings menu (F1), for example "NX2navi 0.0.1-ocarina - game 1.1.1".
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: GPU, driver and Windows version
+      description: For example "RTX 4070, driver 591.44, Windows 11 24H2".
+    validations:
+      required: true
+  - type: dropdown
+    id: when
+    attributes:
+      label: When does it crash?
+      options:
+        - At startup, before the title screen
+        - While loading a save
+        - In gameplay
+        - In a cutscene
+        - In a menu
+    validations:
+      required: true
+  - type: dropdown
+    id: blocker
+    attributes:
+      label: Can you keep playing?
+      options:
+        - "Yes, it does not happen again after a restart, or I can avoid it"
+        - "No, it happens every time at the same point"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What you did before the crash
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: |
+        ### The log
+
+        The log of the run that crashed is `logs\nx2navi.log` in the game's folder. Copy it before you start the game again: the next start renames it to `nx2navi.1.log`, and after five starts it is gone. Attach the whole file without editing it.
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Drag nx2navi.log into this field.
+    validations:
+      required: true
+  - type: textarea
+    id: save
+    attributes:
+      label: Save
+      description: When the crash comes back at one place, zip the `profile` folder next to the game and attach it, and say which file you load.

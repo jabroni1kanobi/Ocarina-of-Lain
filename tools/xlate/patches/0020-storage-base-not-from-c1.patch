@@ -1,0 +1,18 @@
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+@@ -1046,6 +1046,15 @@
+             // because constant buffer are always encoded as the second operand,
+             // so the second operand will always be the one from the last instruction.
+ 
++            // NX2NAVI: c1 holds the compiler's constants (BRX jump tables, offsets), never a buffer address; an address
++            // that adds one of them to a pointer from another bank (Ocarina's NVN2 compute: a push-constant pointer in
++            // c0 plus the constant 12 from c1) has the pointer as its base. Taking c1 sent those stores to nothing.
++            if (src1.Type == OperandType.ConstantBuffer && src2.Type == OperandType.ConstantBuffer &&
++                src2.GetCbufSlot() == 1 && src1.GetCbufSlot() != 1)
++            {
++                return GetBaseAddressCbWithOffset(src1, src2, constOffset);
++            }
++
+             if (src1.Type != OperandType.ConstantBuffer ||
+                 (src1.Type == OperandType.ConstantBuffer && src2.Type == OperandType.ConstantBuffer) ||
+                 (src2.Type == OperandType.ConstantBuffer && src2.GetCbufSlot() == DriverReservedCb))

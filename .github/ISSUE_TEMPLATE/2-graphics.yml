@@ -1,0 +1,38 @@
+name: Graphics problem
+description: Something is drawn wrong, missing, flickering, too dark or too bright.
+labels: [bug, graphics]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search the open and closed issues first. A screenshot of the problem helps most; add the place in the game where it happens.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The title line of the settings menu (F1).
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: GPU, driver and Windows version
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What looks wrong, and where
+      description: The area, the time of day, what Link is doing. Drag screenshots into this field.
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: Settings changed from the defaults
+      description: Scaling, widescreen, frame rate limit and anything else you changed in the menu, or "none".
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Drag `logs\nx2navi.log` from the game's folder into this field.

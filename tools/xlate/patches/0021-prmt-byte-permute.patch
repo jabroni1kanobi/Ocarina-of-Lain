@@ -1,0 +1,161 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmit.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmit.cs
+index d77621d..462c0ca 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmit.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmit.cs
+@@ -215,34 +215,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             context.TranslatorContext.GpuAccessor.Log("Shader instruction Pret is not implemented.");
+         }
+ 
+-        public static void PrmtR(EmitterContext context)
+-        {
+-            context.GetOp<InstPrmtR>();
+-
+-            context.TranslatorContext.GpuAccessor.Log("Shader instruction PrmtR is not implemented.");
+-        }
+-
+-        public static void PrmtI(EmitterContext context)
+-        {
+-            context.GetOp<InstPrmtI>();
+-
+-            context.TranslatorContext.GpuAccessor.Log("Shader instruction PrmtI is not implemented.");
+-        }
+-
+-        public static void PrmtC(EmitterContext context)
+-        {
+-            context.GetOp<InstPrmtC>();
+-
+-            context.TranslatorContext.GpuAccessor.Log("Shader instruction PrmtC is not implemented.");
+-        }
+-
+-        public static void PrmtRc(EmitterContext context)
+-        {
+-            context.GetOp<InstPrmtRc>();
+-
+-            context.TranslatorContext.GpuAccessor.Log("Shader instruction PrmtRc is not implemented.");
+-        }
+-
+         public static void R2b(EmitterContext context)
+         {
+             context.GetOp<InstR2b>();
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitPermute.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitPermute.cs
+new file mode 100644
+index 0000000..b79ad3e
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitPermute.cs
+@@ -0,0 +1,116 @@
++using Ryujinx.Graphics.Shader.Decoders;
++using Ryujinx.Graphics.Shader.IntermediateRepresentation;
++using Ryujinx.Graphics.Shader.Translation;
++
++using static Ryujinx.Graphics.Shader.Instructions.InstEmitHelper;
++using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
++
++namespace Ryujinx.Graphics.Shader.Instructions
++{
++    // NX2NAVI: PRMT (byte permute). Upstream Ryujinx only logged it as not implemented, so the destination kept its old
++    // value; the SM86 lowering (tools/xlate/AmpereLowering.cs Prmt, the HFMA2.RELU sign mask in Half) emits it for every
++    // byte permute of the Switch 2 shaders (82 pixel, 303 vertex and 277 compute programs of Ocarina), which lost them.
++    // Rd byte i is byte k of the 8 bytes {C, A} (A bytes 0-3, C bytes 4-7). In the default mode k is nibble i of B and
++    // its bit 3 replaces the byte with its sign (0x00 or 0xff); the other modes take k from B bits 0-1 alone, as the PTX
++    // prmt modes f4e, b4e, rc8, ecl, ecr and rc16 define.
++    static partial class InstEmit
++    {
++        public static void PrmtR(EmitterContext context)
++        {
++            InstPrmtR op = context.GetOp<InstPrmtR>();
++
++            Operand srcA = GetSrcReg(context, op.SrcA);
++            Operand srcB = GetSrcReg(context, op.SrcB);
++            Operand srcC = GetSrcReg(context, op.SrcC);
++
++            context.Copy(GetDest(op.Dest), EmitPrmt(context, srcA, srcB, srcC, op.PMode));
++        }
++
++        public static void PrmtI(EmitterContext context)
++        {
++            InstPrmtI op = context.GetOp<InstPrmtI>();
++
++            Operand srcA = GetSrcReg(context, op.SrcA);
++            Operand srcB = Const(op.Imm20);
++            Operand srcC = GetSrcReg(context, op.SrcC);
++
++            context.Copy(GetDest(op.Dest), EmitPrmt(context, srcA, srcB, srcC, op.PMode));
++        }
++
++        public static void PrmtC(EmitterContext context)
++        {
++            InstPrmtC op = context.GetOp<InstPrmtC>();
++
++            Operand srcA = GetSrcReg(context, op.SrcA);
++            Operand srcB = GetSrcCbuf(context, op.CbufSlot, op.CbufOffset);
++            Operand srcC = GetSrcReg(context, op.SrcC);
++
++            context.Copy(GetDest(op.Dest), EmitPrmt(context, srcA, srcB, srcC, op.PMode));
++        }
++
++        public static void PrmtRc(EmitterContext context)
++        {
++            InstPrmtRc op = context.GetOp<InstPrmtRc>();
++
++            Operand srcA = GetSrcReg(context, op.SrcA);
++            Operand srcB = GetSrcReg(context, op.SrcC);
++            Operand srcC = GetSrcCbuf(context, op.CbufSlot, op.CbufOffset);
++
++            context.Copy(GetDest(op.Dest), EmitPrmt(context, srcA, srcB, srcC, op.PMode));
++        }
++
++        private static Operand EmitPrmt(EmitterContext context, Operand srcA, Operand srcB, Operand srcC, PMode mode)
++        {
++            Operand result = Const(0);
++            Operand low = context.BitwiseAnd(srcB, Const(3));   // the start byte of the special modes
++
++            for (int i = 0; i < 4; i++)
++            {
++                Operand index;        // 0-7: the source byte of result byte i
++                Operand sign = null;  // non-zero: replicate that byte's sign bit (default mode only)
++
++                switch (mode)
++                {
++                    case PMode.F4e:
++                        index = context.BitwiseAnd(context.IAdd(low, Const(i)), Const(7));
++                        break;
++                    case PMode.B4e:
++                        index = context.BitwiseAnd(context.IAdd(low, Const(8 - i)), Const(7));
++                        break;
++                    case PMode.Rc8:
++                        index = low;
++                        break;
++                    case PMode.Ecl:
++                        index = context.IMaximumU32(low, Const(i));
++                        break;
++                    case PMode.Ecr:
++                        index = context.IMinimumU32(low, Const(i));
++                        break;
++                    case PMode.Rc16:
++                        index = context.BitwiseOr(context.ShiftLeft(context.BitwiseAnd(low, Const(1)), Const(1)), Const(i & 1));
++                        break;
++                    default:
++                        Operand nibble = context.BitfieldExtractU32(srcB, Const(i * 4), Const(4));
++                        index = context.BitwiseAnd(nibble, Const(7));
++                        sign = context.BitwiseAnd(nibble, Const(8));
++                        break;
++                }
++
++                Operand word = context.ConditionalSelect(context.ICompareLessUnsigned(index, Const(4)), srcA, srcC);
++                Operand shift = context.ShiftLeft(context.BitwiseAnd(index, Const(3)), Const(3));
++                Operand value = context.BitfieldExtractU32(word, shift, Const(8));
++
++                if (sign != null)
++                {
++                    Operand negative = context.ICompareNotEqual(context.BitwiseAnd(value, Const(0x80)), Const(0));
++                    Operand replicated = context.ConditionalSelect(negative, Const(0xff), Const(0));
++                    value = context.ConditionalSelect(context.ICompareNotEqual(sign, Const(0)), replicated, value);
++                }
++
++                result = context.BitwiseOr(result, context.ShiftLeft(value, Const(i * 8)));
++            }
++
++            return result;
++        }
++    }
++}

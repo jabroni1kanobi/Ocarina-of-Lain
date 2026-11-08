@@ -1,0 +1,158 @@
+"""Updating the launcher's own release folder (launcher/paths.py, "app/").
+
+An update is staged beside the running version and switched to with two small files, so a failed or interrupted
+update never leaves a half-written release in use:
+
+1. The app archive goes to data/downloads, is checked against the manifest's size and sha256 and unpacks into
+   app/<version>.part, which is renamed to app/<version> once it is complete and holds the expected VERSION.
+2. A new Python (the manifest's runtime id differs from python/runtime-id.txt) unpacks into python.next; the stub
+   swaps it in at its next start, while no Python runs.
+3. app/previous.txt gets the running version and app/current.txt the new one; the launcher starts the stub again,
+   which runs the new version. The stub goes back to previous.txt when the new version fails to start.
+4. The new version rebuilds the game (launcher/jobs.py), then prune() removes every version but these two.
+"""
+import os
+import shutil
+import zipfile
+from pathlib import Path
+
+from . import net, versions
+
+
+class UpdateError(Exception):
+    pass
+
+
+def read_text(path, default=''):
+    try:
+        return Path(path).read_text(encoding='utf-8').strip()
+    except OSError:
+        return default
+
+
+def write_text(path, text):
+    path = Path(path)
+    tmp = path.with_name(path.name + '.tmp')
+    tmp.write_text(text + '\n', encoding='utf-8')
+    os.replace(tmp, path)
+
+
+def current(layout):
+    return read_text(layout.apps / 'current.txt') or layout.version
+
+
+def previous(layout):
+    return read_text(layout.apps / 'previous.txt')
+
+
+def runtime_id(layout):
+    return read_text(layout.python / 'runtime-id.txt')
+
+
+def safe_extract(zip_path, dest):
+    """Unpack a zip into dest, refusing absolute names and names that climb out of it."""
+    dest = Path(dest)
+    root = dest.resolve()
+    with zipfile.ZipFile(zip_path) as z:
+        for info in z.infolist():
+            name = info.filename.replace('\\', '/')
+            if name.startswith('/') or ':' in name.split('/')[0] or '..' in name.split('/'):
+                raise UpdateError(f'{Path(zip_path).name}: unsafe path {info.filename}')
+            target = (dest / name).resolve()
+            if target != root and root not in target.parents:
+                raise UpdateError(f'{Path(zip_path).name}: unsafe path {info.filename}')
+        z.extractall(dest)
+
+
+def _fetch(release, key, layout, progress, cancel, version):
+    url, headers, size, sha = release.asset(key)
+    entry = release.manifest[key]
+    dest = layout.downloads / entry['name']
+    net.download(url, dest, sha256=sha, size=size, headers=headers, progress=progress, cancel=cancel,
+                 version=version)
+    return dest
+
+
+def stage_app(layout, release, progress=None, cancel=None, version='dev'):
+    """Download, check and unpack the release's app archive into app/<version>; returns that folder."""
+    zip_path = _fetch(release, 'app', layout, progress, cancel, version)
+    ver = versions.display(release.version)
+    final = layout.apps / ver
+    part = layout.apps / f'{ver}.part'
+    shutil.rmtree(part, ignore_errors=True)
+    part.mkdir(parents=True)
+    try:
+        safe_extract(zip_path, part)
+        got = read_text(part / 'VERSION')
+        if versions.display(got) != ver or not (part / 'launcher' / 'start.pyw').is_file():
+            raise UpdateError(f'{zip_path.name} holds version {got or "?"} without a launcher, not {ver}')
+        if final.exists():
+            if final.resolve() == layout.app.resolve():
+                raise UpdateError(f'{ver} is the version that runs now')
+            shutil.rmtree(final)
+        os.replace(part, final)
+    except BaseException:
+        shutil.rmtree(part, ignore_errors=True)
+        raise
+    zip_path.unlink(missing_ok=True)
+    return final
+
+
+def runtime_needed(layout, release):
+    rt = release.manifest.get('runtime')
+    return bool(rt) and not layout.dev and rt.get('id') != runtime_id(layout)
+
+
+def stage_runtime(layout, release, progress=None, cancel=None, version='dev'):
+    """Unpack a new Python into python.next for the stub to swap in; False when the running one is current."""
+    if not runtime_needed(layout, release):
+        return False
+    zip_path = _fetch(release, 'runtime', layout, progress, cancel, version)
+    nxt = layout.root / 'python.next'
+    shutil.rmtree(nxt, ignore_errors=True)
+    part = layout.root / 'python.next.part'
+    shutil.rmtree(part, ignore_errors=True)
+    part.mkdir()
+    safe_extract(zip_path, part)
+    if not (part / 'python.exe').is_file() or read_text(part / 'runtime-id.txt') != release.manifest['runtime']['id']:
+        shutil.rmtree(part, ignore_errors=True)
+        raise UpdateError(f'{zip_path.name} is not the runtime {release.manifest["runtime"]["id"]}')
+    os.replace(part, nxt)
+    zip_path.unlink(missing_ok=True)
+    return True
+
+
+def switch_to(layout, ver):
+    """Make ver the version the stub starts, keeping the running one as previous."""
+    if not (layout.apps / ver / 'launcher' / 'start.pyw').is_file():
+        raise UpdateError(f'app/{ver} is not a complete release')
+    now = current(layout)
+    if now != ver:
+        write_text(layout.apps / 'previous.txt', now)
+    write_text(layout.apps / 'current.txt', ver)
+
+
+def rollback(layout):
+    """Back to previous.txt's version; False when there is none to go back to."""
+    prev = previous(layout)
+    if not prev or not (layout.apps / prev / 'launcher' / 'start.pyw').is_file():
+        return False
+    write_text(layout.apps / 'current.txt', prev)
+    (layout.apps / 'previous.txt').unlink(missing_ok=True)
+    return True
+
+
+def prune(layout):
+    """Remove every app version but the current and previous one, an old Python the stub set aside, and stale
+    downloads."""
+    keep = {current(layout), previous(layout)}
+    if layout.apps.is_dir():
+        for d in layout.apps.iterdir():
+            if d.is_dir() and d.name not in keep:
+                shutil.rmtree(d, ignore_errors=True)
+    for d in layout.root.glob('python.old*'):
+        shutil.rmtree(d, ignore_errors=True)
+    if layout.downloads.is_dir():
+        for f in layout.downloads.iterdir():
+            if f.suffix in ('.part', '.zip'):
+                f.unlink(missing_ok=True)

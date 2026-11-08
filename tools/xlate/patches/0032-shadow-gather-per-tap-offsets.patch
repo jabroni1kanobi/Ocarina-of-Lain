@@ -1,0 +1,14 @@
+--- a/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
+@@ -431,7 +431,10 @@
+ 
+             LinkedListNode<INode> oldNode = node;
+ 
+-            if (isGather && !isShadow && hasOffsets)
++            // NX2NAVI: depth-compare gathers too. With per-tap offsets (TLD4.PTP) the else branch below adds only tap 0's
++            // offset, so a shadow map's four taps all came from one place (blocky shadow edges); one gather per tap with
++            // that tap's offset keeps its compared texel, the reference value staying in the copied sources.
++            if (isGather && hasOffsets)
+             {
+                 Operand[] newSources = new Operand[sources.Length];
+ 

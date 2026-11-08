@@ -1,0 +1,15 @@
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
+@@ -134,7 +134,11 @@
+         {
+             InstRed op = context.GetOp<InstRed>();
+ 
+-            (Operand addrLow, Operand addrHigh) = Get40BitsAddress(context, new Register(op.SrcA, RegisterType.Gpr), op.E, op.Imm20);
++            // NX2NAVI: the 20-bit offset is signed, as Atom reads it; unsigned, a reduction at -12 (the culling's group
++            // counts written before a record) landed 1 MiB further on
++            int sOffset = (op.Imm20 << 12) >> 12;
++
++            (Operand addrLow, Operand addrHigh) = Get40BitsAddress(context, new Register(op.SrcA, RegisterType.Gpr), op.E, sOffset);
+ 
+             EmitAtomicOp(context, StorageKind.GlobalMemory, (AtomOp)op.RedOp, op.RedSize, addrLow, addrHigh, GetDest(op.SrcB));
+         }

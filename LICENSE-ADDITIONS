@@ -1,0 +1,19 @@
+Copyright (c) 2026 chrg6. All rights reserved.
+
+This file covers the additions and changes made in this repository after its base import (the first commit of its
+history): new files, and the changed and added lines of existing files, as the commit history shows them.
+
+1. The base import stays under its MIT license (LICENSE). Third-party code stays under the licenses
+   THIRD_PARTY_NOTICES.md lists, with the notices those licenses require. Nothing here limits the rights those
+   licenses give to their parts.
+
+2. For the additions and changes, no license is granted. Without written permission from the copyright holder you may
+   not copy, modify, distribute, publish, sublicense or sell them, in whole or in part.
+
+3. In particular, no permission is granted to use any part of them to train, fine-tune, evaluate or prompt a machine
+   learning model, to build a dataset, or as input to an AI code-generation or code-review service, except by the
+   copyright holder.
+
+4. Access to the repository, whether by invitation or otherwise, does not grant any of the rights above.
+
+This notice is not legal advice; where a copy of this repository is shared, the copyright holder's written terms apply.

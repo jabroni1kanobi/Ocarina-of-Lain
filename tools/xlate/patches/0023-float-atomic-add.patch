@@ -1,0 +1,48 @@
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
+@@ -217,6 +217,13 @@
+                     {
+                         res = context.AtomicAdd(storageKind, e0, e1, value);
+                     }
++                    else if (type == AtomSize.F32FtzRn && storageKind == StorageKind.GlobalMemory)
++                    {
++                        // NX2NAVI: a float add (RED/ATOM .F32.FTZ.RN), which accumulators of light and fog use, was
++                        // dropped here. It is marked FP32 and becomes a compare-and-swap loop with a float add once
++                        // GlobalToStorage knows its buffer (TryGenerateStorageOp).
++                        res = context.Add(Instruction.AtomicAdd | Instruction.FP32, storageKind, Local(), e0, e1, value);
++                    }
+                     else
+                     {
+                         context.TranslatorContext.GpuAccessor.Log($"Invalid reduction type: {type}.");
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+@@ -448,6 +448,13 @@
+                 return false;
+             }
+ 
++            // NX2NAVI: a float atomic add has no inline form (the SPIR-V backend only adds integers): it takes the
++            // helper path, whose TryGenerateStorageOp writes a compare-and-swap loop
++            if (operation.Inst == (Instruction.AtomicAdd | Instruction.FP32))
++            {
++                return false;
++            }
++
+             return (operation.Inst != Instruction.AtomicMaxS32 &&
+                     operation.Inst != Instruction.AtomicMinS32) || targetLanguage == TargetLanguage.Spirv;
+         }
+@@ -928,6 +935,15 @@
+                     case Instruction.AtomicAdd:
+                         resultValue = context.AtomicAdd(StorageKind.StorageBuffer, binding, Const(0), wordOffset, value);
+                         break;
++                    case Instruction.AtomicAdd | Instruction.FP32:
++                        // NX2NAVI: the word is read, the float sum swapped in if the word is still the one read,
++                        // and the loop repeats otherwise (InstEmitMemory EmitAtomicOp marks these)
++                        resultValue = GenerateAtomicCasLoop(context, wordOffset, binding, (memValue) =>
++                        {
++                            return context.FPAdd(memValue, value);
++                        });
++
++                        break;
+                     case Instruction.AtomicAnd:
+                         resultValue = context.AtomicAnd(StorageKind.StorageBuffer, binding, Const(0), wordOffset, value);
+                         break;

@@ -1,0 +1,669 @@
+// Switch 2 movie playback: movie::VideoDecoder (subsdk0) answered by the host with dav1d.
+//
+// The title's movies are WebM with AV1 video only (Event/Movie/*.webm, 1920x1080 60 fps, 8-bit 4:2:0, limited
+// range BT.709); their sound is a separate stream the game plays alongside (Sound/Resource/Stream/<movie>.bwav),
+// so a movie that runs for its real length is also what makes the title sequence audible. The SDK's
+// nn::movie::MediaExtractor demuxes as it is; subsdk0's VideoDecoder sits on nn::codec::video (a video server this
+// host does not have), so the public VideoDecoder methods the game imports are replaced here. VideoFrame stays
+// subsdk0's own object; its layout (subsdk0 VideoFrame::SetBuffer / SetPixelPlaneData / SetTimeStamp /
+// SetEndOfStreamState, sizeof 0x90):
+//   +0x08 + 8 i  plane i data (plane 0 = the buffer of SetBuffer)   +0x28 + 8 i  plane i filled size
+//   +0x48        buffer capacity                                     +0x78        time stamp (TimeSpan, ns)
+//   +0x80        pixel format          +0x84 pixel storage type      +0x88        end of stream (byte)
+// nn::movie::Buffer (sdk): +0x00 data, +0x08 capacity, +0x10 filled size, +0x18 time stamp, +0x20 flags (8 = end
+// of stream, as the game sets it at main+0x3b60014).
+//
+// Decoding is asynchronous, as on the hardware: DecodeAsync queues a copy of the sample and returns; one host thread
+// per decoder runs dav1d and converts each picture to NV12 (the game's frame format: it sizes each frame buffer
+// width * height * 3 / 2 and reads two planes) and to RGBA for the window. Decoding on the caller's thread stalled
+// the game's movie loop (it also acquires frames) by up to 90 ms on heavy frames: visible stutter.
+// Back-pressure: while QREADY samples or pictures wait, DecodeAsync answers R_BUSY and the input-ready event is
+// clear; the game's decode step (main+0x3b5e600) treats any non-zero result as "try again" on that event.
+// AcquireVideoFrame answers 0x7b when nothing is ready (subsdk0 VideoDecoder::AcquireVideoFrame's own result).
+// The game draws the frame with its own shaders (a YUV compute pass). Each frame is debanded first (flat areas
+// averaged with sub-level precision), so the encoder's flattened gradients (skies, clouds) do not show as hard bands,
+// and written back to NV12 with a 4x4 ordered dither. With NX2NAVI_MOVIE_OVERLAY=1 the host instead shows the frame
+// over the game image (gfx_present.c gfx_movie_frame_own), converted here: BT.709 limited range, bilinear chroma,
+// the same dither. NX2NAVI_MOVIE_DEBAND=0 turns the deband off.
+// NX2NAVI_MOVIES=off skips movies instead (romfs.c movie_skipped); this title then quits, so for testing use
+// NX2NAVI_MOVIE_SKIP=<seconds>: a movie ends as if it had played to its end once its samples reach that time (the next
+// sample becomes the end-of-stream marker, later ones are dropped), and the game goes on as after a whole movie.
+#include <dav1d/dav1d.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "cfg.h"
+#include "gfx.h"
+#include "host.h"
+#include "nvn_api.h"
+#include "platform/platform.h"
+
+#define R_NO_FRAME 0x7bu
+#define R_BUSY 0x7du       // DecodeAsync while the queues are full: the game retries on its input-ready event
+#define BUFFER_FLAG_EOS 0x8u
+#define QMAX 8       // decoded pictures held at most
+#define INMAX 8      // samples waiting for the decoder thread at most
+#define QREADY 4     // input-ready while fewer than this many samples and pictures wait
+#define NFRAMES 16   // registered VideoFrames
+
+typedef struct { uint8_t *nv12, *rgba; int w, h; int64_t ts; int eos; } Picture;
+typedef struct { uint8_t *data; size_t size; int64_t ts; int eos; } Sample;
+typedef struct {
+    PlatMutex lock;          // queues, frames, flags
+    PlatMutex codec;         // dav1d: the decoder thread while it decodes, Flush / Finalize
+    PlatCond work;           // a sample arrived, or quit
+    PlatThread *thread;
+    Dav1dContext *dav1d;
+    uint8_t in_ev[0x40], out_ev[0x40];   // nn::os::SystemEventType each
+    int in_bound, out_bound;
+    uint64_t frame[NFRAMES];
+    int busy[NFRAMES], nframe;
+    Picture q[QMAX];
+    int qh, qn;
+    Sample in[INMAX];
+    int ih, in_n;
+    int quit, eos_queued;
+    uint64_t generation;     // bumped by Flush: pictures of an older one are dropped
+    uint64_t decoded, shown;
+} Video;
+
+static Video *video_of(void *obj) { return obj ? *(Video **)obj : NULL; }
+
+// under v->lock
+static void update_events(Video *v) {
+    int ready = v->qn < QREADY && v->in_n < QREADY && !v->eos_queued;
+    if (v->in_bound) {
+        if (ready) kern_signal_system_event((uint64_t)(uintptr_t)v->in_ev);
+        else kern_clear_system_event((uint64_t)(uintptr_t)v->in_ev);
+    }
+    if (v->out_bound) {
+        if (v->qn) kern_signal_system_event((uint64_t)(uintptr_t)v->out_ev);
+        else kern_clear_system_event((uint64_t)(uintptr_t)v->out_ev);
+    }
+}
+
+static void picture_free(Picture *p) {
+    free(p->nv12);
+    free(p->rgba);
+    p->nv12 = p->rgba = NULL;
+}
+
+// under v->lock
+static void clear_queues(Video *v) {
+    while (v->qn) {
+        picture_free(&v->q[v->qh]);
+        v->qh = (v->qh + 1) % QMAX;
+        v->qn--;
+    }
+    while (v->in_n) {
+        free(v->in[v->ih].data);
+        v->ih = (v->ih + 1) % INMAX;
+        v->in_n--;
+    }
+    v->eos_queued = 0;
+}
+
+// Deband (the approach of mpv's deband filter, our own code): the movies' flat gradients (skies, clouds) are encoded
+// as blocks of one level with hard contours between them. For each sample, four neighbours at a pseudo-random offset
+// of 4..16 samples (rotated per pixel, so no pattern repeats) are compared with it; when all lie within THRESH levels
+// the area is flat and the sample becomes their mean with 4 bits of fraction, else it keeps its value. Edges and
+// texture differ by more than that and stay as they are. Output: plane * 16.
+#define DEBAND_THRESH 3
+static void deband(const uint8_t *src, uint16_t *dst, int w, int h, int stride, int step, int y0, int y1) {
+    static int16_t off[64][2];
+    static volatile int32_t ready;
+    if (!__atomic_load_n(&ready, __ATOMIC_ACQUIRE)) {
+        for (int i = 0; i < 64; i++) {   // radii 4..16 at golden-angle rotations
+            double r = 4 + (i * 12) / 63.0, t = i * 2.39996323;
+            off[i][0] = (int16_t)(r * __builtin_cos(t)), off[i][1] = (int16_t)(r * __builtin_sin(t));
+        }
+        __atomic_store_n(&ready, 1, __ATOMIC_RELEASE);
+    }
+    for (int y = y0; y < y1; y++) {
+        const uint8_t *row = src + (size_t)y * stride;
+        uint16_t *o = dst + (size_t)y * w;
+        for (int x = 0; x < w; x++) {
+            int c = row[x * step];
+            const int16_t *d = off[(x * 7 + y * 13 + ((x ^ y) >> 2)) & 63];
+            int dx = d[0], dy = d[1];
+            int xa = x + dx, xb = x - dx, ya = y + dy, yb = y - dy;
+            int xc = x - dy, xd = x + dy, yc = y + dx, yd = y - dx;
+            if (xa < 0 || xb < 0 || xc < 0 || xd < 0 || xa >= w || xb >= w || xc >= w || xd >= w || ya < 0 || yb < 0 ||
+                yc < 0 || yd < 0 || ya >= h || yb >= h || yc >= h || yd >= h) {
+                o[x] = (uint16_t)(c * 16);
+                continue;
+            }
+            int s0 = src[(size_t)ya * stride + xa * step], s1 = src[(size_t)yb * stride + xb * step];
+            int s2 = src[(size_t)yc * stride + xc * step], s3 = src[(size_t)yd * stride + xd * step];
+            int m0 = abs(s0 - c), m1 = abs(s1 - c), m2 = abs(s2 - c), m3 = abs(s3 - c);
+            if (m0 > DEBAND_THRESH || m1 > DEBAND_THRESH || m2 > DEBAND_THRESH || m3 > DEBAND_THRESH)
+                o[x] = (uint16_t)(c * 16);
+            else
+                o[x] = (uint16_t)((s0 + s1 + s2 + s3) * 4);   // the mean, * 16
+        }
+    }
+}
+
+// Debanded planes (* 16) -> RGBA, BT.709 limited range. Chroma is interpolated bilinearly between the 4:2:0 samples
+// (centred between luma rows, co-sited with even columns); a 4x4 Bayer threshold is added before the final rounding
+// to 8 bits, which turns the remaining sub-level steps into fine noise instead of bands.
+static void to_rgba(const uint16_t *Y, const uint16_t *U, const uint16_t *V, uint8_t *out, int w, int h, int y0, int y1) {
+    static const int bayer[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+    const int cw = w / 2, ch = h / 2;
+    for (int y = y0; y < y1; y++) {
+        // the two chroma rows around this luma row, weighted 3:1 toward the nearer one
+        int cy0 = (y - 1) >> 1, cy1 = cy0 + 1, wy1 = (y & 1) ? 1 : 3, wy0 = 4 - wy1;
+        if (cy0 < 0) cy0 = 0;
+        if (cy1 >= ch) cy1 = ch - 1;
+        const uint16_t *u0 = U + (size_t)cy0 * cw, *u1 = U + (size_t)cy1 * cw;
+        const uint16_t *v0 = V + (size_t)cy0 * cw, *v1 = V + (size_t)cy1 * cw, *yr = Y + (size_t)y * w;
+        uint8_t *o = out + (size_t)y * w * 4;
+        for (int x = 0; x < w; x++) {
+            int cx0 = x >> 1, cx1 = (x & 1) && cx0 + 1 < cw ? cx0 + 1 : cx0;   // even: on the sample, odd: halfway
+            int wx1 = cx1 != cx0 ? 2 : 0, wx0 = 4 - wx1;
+            // chroma * 16 * 16 (plane * 16, weights summing to 16) -> >> 4: * 16
+            int u = ((u0[cx0] * wx0 + u0[cx1] * wx1) * wy0 + (u1[cx0] * wx0 + u1[cx1] * wx1) * wy1) >> 4;
+            int vv = ((v0[cx0] * wx0 + v0[cx1] * wx1) * wy0 + (v1[cx0] * wx0 + v1[cx1] * wx1) * wy1) >> 4;
+            int d = u - 128 * 16, e = vv - 128 * 16;     // * 16
+            int cc = (yr[x] - 16 * 16) * 298;            // * 16 * 256
+            int dith = bayer[y & 3][x & 3] * 256 + 128;  // < 1 output step in the * 4096 unit
+            int r = (cc + 459 * e + dith) >> 12;
+            int g = (cc - 55 * d - 136 * e + dith) >> 12;
+            int b = (cc + 541 * d + dith) >> 12;
+            o[4 * x] = (uint8_t)(r < 0 ? 0 : r > 255 ? 255 : r);
+            o[4 * x + 1] = (uint8_t)(g < 0 ? 0 : g > 255 ? 255 : g);
+            o[4 * x + 2] = (uint8_t)(b < 0 ? 0 : b > 255 ? 255 : b);
+            o[4 * x + 3] = 255;
+        }
+    }
+}
+
+// The overlay conversion runs in NSTRIPES horizontal stripes on short-lived threads, in two phases (deband every
+// plane, then convert), since the convert reads chroma rows of the neighbouring stripe. One thread took 27 ms per
+// 1080p frame: too slow for 60 fps.
+#define NSTRIPES 6
+typedef struct {
+    int phase, y0, y1, w, h;
+    uint8_t *nv12;
+    uint16_t *Y16, *U16, *V16;
+    uint8_t *rgba;
+} Stripe;
+// The debanded planes back into the NV12 frame (the game converts it itself), with a 4x4 ordered dither: the
+// 4 fraction bits become texel-sized noise instead of bands.
+static void to_nv12(const Stripe *t) {
+    static const int bayer[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+    int w = t->w;
+    for (int y = t->y0; y < t->y1; y++)
+        for (int x = 0; x < w; x++) {
+            int v = (t->Y16[(size_t)y * w + x] + bayer[y & 3][x & 3]) >> 4;
+            t->nv12[(size_t)y * w + x] = (uint8_t)(v > 255 ? 255 : v);
+        }
+    uint8_t *uv = t->nv12 + (size_t)w * t->h;
+    for (int y = t->y0 / 2; y < t->y1 / 2; y++)
+        for (int x = 0; x < w / 2; x++) {
+            int d = bayer[y & 3][x & 3], i = y * (w / 2) + x;
+            int u = (t->U16[i] + d) >> 4, v = (t->V16[i] + (15 - d)) >> 4;
+            uv[(size_t)y * w + 2 * x] = (uint8_t)(u > 255 ? 255 : u);
+            uv[(size_t)y * w + 2 * x + 1] = (uint8_t)(v > 255 ? 255 : v);
+        }
+}
+
+static void stripe_run(void *arg) {
+    Stripe *t = arg;
+    if (t->phase == 0) {
+        const uint8_t *uv = t->nv12 + (size_t)t->w * t->h;
+        deband(t->nv12, t->Y16, t->w, t->h, t->w, 1, t->y0, t->y1);
+        deband(uv, t->U16, t->w / 2, t->h / 2, t->w, 2, t->y0 / 2, t->y1 / 2);
+        deband(uv + 1, t->V16, t->w / 2, t->h / 2, t->w, 2, t->y0 / 2, t->y1 / 2);
+    } else if (t->rgba) {
+        to_rgba(t->Y16, t->U16, t->V16, t->rgba, t->w, t->h, t->y0, t->y1);
+    } else {
+        to_nv12(t);
+    }
+}
+static void run_stripes(Stripe base) {
+    Stripe st[NSTRIPES];
+    PlatThread *th[NSTRIPES] = {0};
+    int rows = ((base.h + NSTRIPES - 1) / NSTRIPES + 1) & ~1;   // even: chroma rows split at the same places
+    for (int i = 0; i < NSTRIPES; i++) {
+        st[i] = base;
+        st[i].y0 = i * rows < base.h ? i * rows : base.h;
+        st[i].y1 = (i + 1) * rows < base.h ? (i + 1) * rows : base.h;
+        if (i) th[i] = plat_thread_new(stripe_run, &st[i], "movie convert");
+        if (i && !th[i]) stripe_run(&st[i]);
+    }
+    stripe_run(&st[0]);
+    for (int i = 1; i < NSTRIPES; i++)
+        if (th[i]) plat_thread_join(th[i]);
+}
+
+// One dav1d picture (8- or 10-bit 4:2:0) -> NV12 with 8-bit samples, and its RGBA; decoder thread
+static int make_picture(const Dav1dPicture *pic, Picture *p) {
+    int w = pic->p.w, h = pic->p.h, hbd = pic->p.bpc > 8, sh = pic->p.bpc - 8;
+    if (pic->p.layout != DAV1D_PIXEL_LAYOUT_I420) {
+        static volatile int32_t logged;
+        if (!plat_xchg32(&logged, 1)) rt_log("movie: picture layout %d is not 4:2:0: skipped", pic->p.layout);
+        return 0;
+    }
+    {
+        static volatile int32_t logged;
+        if (!plat_xchg32(&logged, 1) && pic->seq_hdr)
+            rt_log("movie: stream %dx%d, %d-bit, colour range %s, matrix %d, primaries %d, transfer %d", w, h,
+                   pic->p.bpc, pic->seq_hdr->color_range ? "full" : "limited", pic->seq_hdr->mtrx, pic->seq_hdr->pri,
+                   pic->seq_hdr->trc);
+    }
+    // The host overlay (NX2NAVI_MOVIE_OVERLAY=1) takes an RGBA frame; without it the game converts the NV12 frame itself.
+    static int overlay = -1;
+    if (overlay < 0) {
+        const char *e = cfg_get("NX2NAVI_MOVIE_OVERLAY");
+        overlay = e && strcmp(e, "0");
+    }
+    uint8_t *o = malloc((size_t)w * h * 3 / 2), *rgba = overlay ? malloc((size_t)w * h * 4) : NULL;
+    if (!o || (overlay && !rgba)) rt_fatal("movie: out of memory for a %dx%d frame", w, h);
+    const ptrdiff_t ys = pic->stride[0], cs = pic->stride[1];
+    for (int y = 0; y < h; y++) {
+        const uint8_t *row = (const uint8_t *)pic->data[0] + y * ys;
+        if (!hbd) memcpy(o + (size_t)y * w, row, (size_t)w);
+        else for (int x = 0; x < w; x++) o[(size_t)y * w + x] = (uint8_t)(((const uint16_t *)row)[x] >> sh);
+    }
+    uint8_t *uv = o + (size_t)w * h;
+    for (int y = 0; y < h / 2; y++) {
+        const uint8_t *u = (const uint8_t *)pic->data[1] + y * cs, *vv = (const uint8_t *)pic->data[2] + y * cs;
+        for (int x = 0; x < w / 2; x++) {
+            uv[(size_t)y * w + 2 * x] = hbd ? (uint8_t)(((const uint16_t *)u)[x] >> sh) : u[x];
+            uv[(size_t)y * w + 2 * x + 1] = hbd ? (uint8_t)(((const uint16_t *)vv)[x] >> sh) : vv[x];
+        }
+    }
+    // debanded planes (NX2NAVI_MOVIE_DEBAND=0 keeps the decoded ones), then the overlay's RGBA or the dithered NV12
+    {
+        static int deband_on = -1;
+        if (deband_on < 0) {
+            const char *e = cfg_get("NX2NAVI_MOVIE_DEBAND");
+            deband_on = !(e && !strcmp(e, "0"));
+        }
+        uint16_t *Y16 = malloc((size_t)w * h * 2), *U16 = malloc((size_t)w * h / 2), *V16 = malloc((size_t)w * h / 2);
+        if (!Y16 || !U16 || !V16) rt_fatal("movie: out of memory for a %dx%d frame", w, h);
+        Stripe base = {0, 0, 0, w, h, o, Y16, U16, V16, rgba};
+        if (deband_on) {
+            run_stripes(base);
+        } else if (!rgba) {
+            free(Y16), free(U16), free(V16);
+            *p = (Picture){o, rgba, w, h, pic->m.timestamp, 0};
+            return 1;
+        } else {
+            for (size_t i = 0; i < (size_t)w * h; i++) Y16[i] = (uint16_t)(o[i] * 16);
+            for (size_t i = 0; i < (size_t)w * h / 4; i++) U16[i] = (uint16_t)(uv[2 * i] * 16), V16[i] = (uint16_t)(uv[2 * i + 1] * 16);
+        }
+        base.phase = 1;
+        run_stripes(base);
+        free(Y16), free(U16), free(V16);
+    }
+    *p = (Picture){o, rgba, w, h, pic->m.timestamp, 0};
+    return 1;
+}
+
+// Queues a decoded picture, waiting while the queue is full (the game acquires at the movie's pace); decoder thread
+static void deliver(Video *v, Picture p, uint64_t gen) {
+    plat_mutex_lock(&v->lock);
+    while (v->qn == QMAX && !v->quit && v->generation == gen) {
+        plat_mutex_unlock(&v->lock);
+        plat_sleep_ms(2);
+        plat_mutex_lock(&v->lock);
+    }
+    if (v->quit || v->generation != gen) {
+        plat_mutex_unlock(&v->lock);
+        picture_free(&p);
+        return;
+    }
+    v->q[(v->qh + v->qn) % QMAX] = p;
+    v->qn++;
+    v->decoded += !p.eos;
+    update_events(v);
+    plat_mutex_unlock(&v->lock);
+}
+
+static void drain(Video *v, uint64_t gen) {
+    Dav1dPicture pic = {0};
+    while (dav1d_get_picture(v->dav1d, &pic) == 0) {
+        Picture p;
+        int ok = make_picture(&pic, &p);
+        dav1d_picture_unref(&pic);
+        if (ok) deliver(v, p, gen);
+    }
+}
+
+static void decoder_thread(void *arg) {
+    Video *v = arg;
+    plat_mutex_lock(&v->lock);
+    for (;;) {
+        while (!v->in_n && !v->quit) plat_cond_wait(&v->work, &v->lock);
+        if (v->quit) break;
+        Sample s = v->in[v->ih];
+        v->ih = (v->ih + 1) % INMAX;
+        v->in_n--;
+        uint64_t gen = v->generation;
+        update_events(v);
+        plat_mutex_unlock(&v->lock);
+        plat_mutex_lock(&v->codec);
+        // a flush (ov_flush) between taking the sample and the codec: the sample belongs to the stream before it, and fed
+        // into the flushed decoder its picture would come out after the seek
+        plat_mutex_lock(&v->lock);
+        int stale = v->generation != gen;
+        plat_mutex_unlock(&v->lock);
+        if (stale) s.size = 0, s.eos = 0;
+        if (v->dav1d && s.data && s.size) {
+            Dav1dData d = {0};
+            uint8_t *p = dav1d_data_create(&d, s.size);
+            if (p) {
+                memcpy(p, s.data, s.size);
+                d.m.timestamp = s.ts;
+                while (d.sz) {
+                    int r = dav1d_send_data(v->dav1d, &d);
+                    if (r == DAV1D_ERR(EAGAIN)) drain(v, gen);
+                    else if (r < 0) {
+                        static volatile int32_t logged;
+                        if (!plat_xchg32(&logged, 1)) rt_log("movie: dav1d rejected a sample (%d)", r);
+                        dav1d_data_unref(&d);
+                        break;
+                    }
+                }
+                drain(v, gen);
+            }
+        }
+        if (s.eos && v->dav1d) {
+            drain(v, gen);
+            deliver(v, (Picture){NULL, NULL, 0, 0, s.ts, 1}, gen);
+        }
+        plat_mutex_unlock(&v->codec);
+        free(s.data);
+        plat_mutex_lock(&v->lock);
+    }
+    plat_mutex_unlock(&v->lock);
+}
+
+static void stop_thread(Video *v) {
+    if (!v->thread) return;
+    plat_mutex_lock(&v->lock);
+    v->quit = 1;
+    plat_cond_broadcast(&v->work);
+    plat_mutex_unlock(&v->lock);
+    plat_thread_join(v->thread);
+    v->thread = NULL;
+    v->quit = 0;
+}
+
+static void finalize(Video *v) {
+    stop_thread(v);
+    plat_mutex_lock(&v->codec);
+    if (v->dav1d) dav1d_close(&v->dav1d);
+    plat_mutex_unlock(&v->codec);
+    plat_mutex_lock(&v->lock);
+    clear_queues(v);
+    memset(v->busy, 0, sizeof v->busy);
+    plat_mutex_unlock(&v->lock);
+}
+
+// ---- movie::VideoDecoder
+// VideoDecoder() / ~VideoDecoder(): the object's first 8 bytes hold the host record
+static void ov_ctor(Cpu *c) { *(Video **)arg_p(c, 0) = NULL; }
+static void ov_dtor(Cpu *c) {
+    Video **slot = arg_p(c, 0);
+    if (!slot || !*slot) return;
+    finalize(*slot);
+    free(*slot);   // the bound events' kernel handles stay, as for any guest event never destroyed
+    *slot = NULL;
+    gfx_movie_stop();
+}
+// Result Initialize(void *memory, size_t size, MediaMimeType mime, VideoDecoderOutputFormat format, VideoCodecMode)
+static void ov_initialize(Cpu *c) {
+    Video **slot = arg_p(c, 0);
+    if (!*slot) {
+        *slot = calloc(1, sizeof **slot);
+        if (!*slot) rt_fatal("movie: decoder allocation");
+        plat_mutex_init(&(*slot)->lock);
+        plat_mutex_init(&(*slot)->codec);
+        plat_cond_init(&(*slot)->work);
+    }
+    Video *v = *slot;
+    finalize(v);
+    Dav1dSettings s;
+    dav1d_default_settings(&s);
+    // Frame threading on (dav1d picks the delay): heavy stretches of the title movie took longer than a frame to
+    // decode one picture at a time (max_frame_delay 1) and the game's loop waited up to 94 ms for them. The delay
+    // costs nothing here, as decoding runs ahead on its own thread; end of stream drains the delayed pictures.
+    s.n_threads = 8;
+    s.max_frame_delay = 0;
+    int r = dav1d_open(&v->dav1d, &s);
+    if (r < 0) rt_fatal("movie: dav1d_open failed (%d)", r);
+    v->thread = plat_thread_new(decoder_thread, v, "movie decoder");
+    if (!v->thread) rt_fatal("movie: cannot start the decoder thread");
+    rt_log("movie: video decoder up (AV1 via dav1d %s on its own thread; mime %u, output format %u, mode %u)",
+           dav1d_version(), (unsigned)arg_x(c, 3), (unsigned)arg_x(c, 4), (unsigned)arg_x(c, 5));
+    ret_x(c, 0);
+}
+// Result Configure(const MediaProperty *, const void *configuration, size_t): the AV1 sequence header also comes
+// in band with the first key frame, which dav1d reads
+static void ov_ok(Cpu *c) { ret_x(c, 0); }
+// Result Finalize()
+static void ov_finalize(Cpu *c) {
+    Video *v = video_of(arg_p(c, 0));
+    if (v) {
+        rt_log("movie: video decoder finalised (%llu frames decoded, %llu shown)", (unsigned long long)v->decoded,
+               (unsigned long long)v->shown);
+        finalize(v);
+    }
+    gfx_movie_stop();
+    ret_x(c, 0);
+}
+// Result RegisterVideoFrame(VideoFrame **frames, int count)
+static void ov_register(Cpu *c) {
+    Video *v = video_of(arg_p(c, 0));
+    uint64_t *frames = arg_p(c, 1);
+    int n = (int)arg_x(c, 2);
+    if (!v || n < 0 || n > NFRAMES || (n && !frames)) rt_fatal("movie: RegisterVideoFrame of %d frames", n);
+    plat_mutex_lock(&v->lock);
+    memcpy(v->frame, frames, (size_t)n * sizeof *frames);
+    memset(v->busy, 0, sizeof v->busy);
+    v->nframe = n;
+    // Each frame buffer starts as NV12 black (Y 16, UV 128 in its last third). The game converts a frame it holds
+    // before a picture arrives; zeros there are YUV (0, 0, 0), green, in stripes where rows were partly written.
+    for (int i = 0; i < n; i++) {
+        uint8_t *fr = (uint8_t *)(uintptr_t)frames[i], *buf;
+        uint64_t cap;
+        if (!fr) continue;
+        memcpy(&buf, fr + 0x08, 8), memcpy(&cap, fr + 0x48, 8);
+        if (!buf || cap < 3 || cap > (64u << 20)) continue;
+        uint64_t ysz = cap / 3 * 2;
+        memset(buf, 16, (size_t)ysz);
+        memset(buf + ysz, 128, (size_t)(cap - ysz));
+    }
+    plat_mutex_unlock(&v->lock);
+    ret_x(c, 0);
+}
+// Result GetInputReadyEvent(SystemEventType **out) / GetOutputReadyEvent(SystemEventType **out)
+static void get_event(Cpu *c, int input) {
+    Video *v = video_of(arg_p(c, 0));
+    uint64_t *out = arg_p(c, 1);
+    if (!v || !out) rt_fatal("movie: Get%sReadyEvent before Initialize", input ? "Input" : "Output");
+    uint8_t *ev = input ? v->in_ev : v->out_ev;
+    int *bound = input ? &v->in_bound : &v->out_bound;
+    if (!*bound) {
+        kern_bind_system_event(c, (uint64_t)(uintptr_t)ev, 0);
+        plat_mutex_lock(&v->lock);
+        *bound = 1;
+        plat_mutex_unlock(&v->lock);
+    }
+    plat_mutex_lock(&v->lock);
+    update_events(v);
+    plat_mutex_unlock(&v->lock);
+    *out = (uint64_t)(uintptr_t)ev;
+    ret_x(c, 0);
+}
+static void ov_input_event(Cpu *c) { get_event(c, 1); }
+static void ov_output_event(Cpu *c) { get_event(c, 0); }
+// Result Flush(): samples and pictures not yet acquired are dropped (a seek or a restart follows)
+static void ov_flush(Cpu *c) {
+    Video *v = video_of(arg_p(c, 0));
+    if (v) {
+        plat_mutex_lock(&v->lock);
+        v->generation++;   // the decoder thread drops what it is making
+        clear_queues(v);
+        plat_mutex_unlock(&v->lock);
+        plat_mutex_lock(&v->codec);
+        if (v->dav1d) dav1d_flush(v->dav1d);
+        plat_mutex_unlock(&v->codec);
+        plat_mutex_lock(&v->lock);
+        update_events(v);
+        plat_mutex_unlock(&v->lock);
+    }
+    ret_x(c, 0);
+}
+// Result DecodeAsync(const nn::movie::Buffer *sample): queued for the decoder thread
+static void ov_decode(Cpu *c) {
+    Video *v = video_of(arg_p(c, 0));
+    const uint8_t *b = arg_p(c, 1);
+    if (!v || !v->dav1d || !b) {
+        ret_x(c, 0);
+        return;
+    }
+    const uint8_t *data;
+    uint64_t size;
+    int64_t ts;
+    uint32_t flags;
+    memcpy(&data, b, 8), memcpy(&size, b + 0x10, 8), memcpy(&ts, b + 0x18, 8), memcpy(&flags, b + 0x20, 4);
+    int eos = (flags & BUFFER_FLAG_EOS) != 0;
+    static int64_t skip_ns = -2;   // NX2NAVI_MOVIE_SKIP: -1 off
+    if (skip_ns == -2) {
+        const char *e = cfg_get("NX2NAVI_MOVIE_SKIP");
+        skip_ns = e && *e ? (int64_t)(atof(e) * 1e9) : -1;
+        if (skip_ns >= 0) rt_log("movie: movies end after %.1f s (NX2NAVI_MOVIE_SKIP)", skip_ns / 1e9);
+    }
+    plat_mutex_lock(&v->lock);
+    if (skip_ns >= 0 && v->eos_queued) {   // after the early end: what the demuxer still sends is dropped
+        plat_mutex_unlock(&v->lock);
+        ret_x(c, 0);
+        return;
+    }
+    if (skip_ns >= 0 && !eos && ts >= skip_ns) eos = 1, size = 0;   // the early end
+    if (v->in_n >= INMAX || ((v->qn >= QREADY || v->in_n >= QREADY) && !eos)) {
+        update_events(v);
+        plat_mutex_unlock(&v->lock);
+        ret_x(c, R_BUSY);
+        return;
+    }
+    Sample s = {NULL, 0, ts, eos};
+    if (data && size) {
+        s.data = malloc((size_t)size);
+        if (!s.data) rt_fatal("movie: out of memory for a %llu-byte sample", (unsigned long long)size);
+        memcpy(s.data, data, (size_t)size);
+        s.size = (size_t)size;
+    }
+    v->in[(v->ih + v->in_n) % INMAX] = s;
+    v->in_n++;
+    if (eos) v->eos_queued = 1;
+    update_events(v);
+    plat_cond_signal(&v->work);
+    plat_mutex_unlock(&v->lock);
+    ret_x(c, 0);
+}
+// Result AcquireVideoFrame(VideoFrame **out): the oldest decoded picture in a free registered frame
+static void ov_acquire(Cpu *c) {
+    Video *v = video_of(arg_p(c, 0));
+    uint64_t *out = arg_p(c, 1);
+    if (!v || !out) {
+        ret_x(c, R_NO_FRAME);
+        return;
+    }
+    plat_mutex_lock(&v->lock);
+    int f = 0;
+    while (f < v->nframe && v->busy[f]) f++;
+    if (!v->qn || f == v->nframe) {
+        plat_mutex_unlock(&v->lock);
+        ret_x(c, R_NO_FRAME);
+        return;
+    }
+    Picture p = v->q[v->qh];
+    v->qh = (v->qh + 1) % QMAX;
+    v->qn--;
+    uint8_t *fr = (uint8_t *)(uintptr_t)v->frame[f];
+    uint8_t *buf;
+    uint64_t cap;
+    memcpy(&buf, fr + 0x08, 8), memcpy(&cap, fr + 0x48, 8);
+    uint64_t ysz = (uint64_t)p.w * p.h, uvsz = ysz / 2;
+    if (p.nv12 && buf && cap >= ysz + uvsz) {
+        memcpy(buf, p.nv12, (size_t)(ysz + uvsz));
+        // The game's YUV pass reads this buffer on the GPU. A host write into pool storage is one the page write
+        // tracking may not see in time (a mirror or texture over it kept its older or still-empty bytes: frames
+        // with stripes of zeros, which NV12 shows as green), so the back end is told directly.
+        nvn_guest_written((uint64_t)(uintptr_t)buf, ysz + uvsz);
+        uint64_t uvp = (uint64_t)(uintptr_t)(buf + ysz);
+        memcpy(fr + 0x10, &uvp, 8);
+        memcpy(fr + 0x28, &ysz, 8), memcpy(fr + 0x30, &uvsz, 8);
+    } else {
+        uint64_t zero = 0;
+        memcpy(fr + 0x28, &zero, 8), memcpy(fr + 0x30, &zero, 8);
+        if (p.nv12) {
+            static volatile int32_t logged;
+            if (!plat_xchg32(&logged, 1))
+                rt_log("movie: frame buffer %#llx bytes is smaller than a %dx%d NV12 frame", (unsigned long long)cap,
+                       p.w, p.h);
+        }
+    }
+    memcpy(fr + 0x78, &p.ts, 8);
+    fr[0x88] = (uint8_t)p.eos;
+    v->busy[f] = 1;
+    v->shown += !p.eos;
+    if (p.nv12 && v->shown == 1) rt_log("movie: first frame %dx%d shown", p.w, p.h);
+    if (p.nv12) {   // pacing report every 600 frames (10 s): the gaps between acquisitions and their time stamps
+        static uint64_t last_ns, sum_gap, max_gap, n;
+        uint64_t now = plat_now_ns(), gap = last_ns ? now - last_ns : 0;
+        sum_gap += gap, n++;
+        if (gap > max_gap) max_gap = gap;
+        if (n % 600 == 0) {
+            rt_log("movie: pacing over 600 frames: acquire gap avg %.2f ms, max %.2f ms; %d pictures waiting",
+                   sum_gap / 600 / 1e6, max_gap / 1e6, v->qn);
+            sum_gap = max_gap = 0;
+        }
+        last_ns = now;
+    }
+    update_events(v);
+    plat_mutex_unlock(&v->lock);
+    if (p.rgba) gfx_movie_frame_own(p.rgba, p.w, p.h), p.rgba = NULL;   // the overlay takes the buffer
+    if (p.eos) gfx_movie_stop();
+    picture_free(&p);
+    *out = v->frame[f];
+    ret_x(c, 0);
+}
+// Result ReleaseVideoFrame(VideoFrame *)
+static void ov_release(Cpu *c) {
+    Video *v = video_of(arg_p(c, 0));
+    uint64_t fr = arg_x(c, 1);
+    if (v) {
+        plat_mutex_lock(&v->lock);
+        for (int i = 0; i < v->nframe; i++)
+            if (v->frame[i] == fr) v->busy[i] = 0;
+        update_events(v);
+        plat_mutex_unlock(&v->lock);
+    }
+    ret_x(c, 0);
+}
+
+// Skipping movies (NX2NAVI_MOVIES=off) leaves the subsdk0 decoder in place: the movie never opens, so it is not called.
+#define S(n) "_ZN5movie12VideoDecoder" n
+HOST_OVERRIDE(S("C1Ev"), ov_ctor);
+HOST_OVERRIDE(S("D1Ev"), ov_dtor);
+HOST_OVERRIDE(S("10InitializeEPvmN2nn5movie13MediaMimeTypeENS_24VideoDecoderOutputFormatENS_14VideoCodecModeE"),
+              ov_initialize);
+HOST_OVERRIDE(S("9ConfigureEPKN2nn5movie13MediaPropertyEPKvm"), ov_ok);
+HOST_OVERRIDE(S("8FinalizeEv"), ov_finalize);
+HOST_OVERRIDE(S("18RegisterVideoFrameEPPNS_10VideoFrameEi"), ov_register);
+HOST_OVERRIDE(S("18GetInputReadyEventEPPN2nn2os15SystemEventTypeE"), ov_input_event);
+HOST_OVERRIDE(S("19GetOutputReadyEventEPPN2nn2os15SystemEventTypeE"), ov_output_event);
+HOST_OVERRIDE(S("5StartEv"), ov_ok);
+HOST_OVERRIDE(S("4StopEv"), ov_ok);
+HOST_OVERRIDE(S("5FlushEv"), ov_flush);
+HOST_OVERRIDE(S("11DecodeAsyncEPKN2nn5movie6BufferE"), ov_decode);
+HOST_OVERRIDE(S("17AcquireVideoFrameEPPNS_10VideoFrameE"), ov_acquire);
+HOST_OVERRIDE(S("17ReleaseVideoFrameEPNS_10VideoFrameE"), ov_release);
+#undef S

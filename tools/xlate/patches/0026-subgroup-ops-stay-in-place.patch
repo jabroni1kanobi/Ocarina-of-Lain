@@ -1,0 +1,19 @@
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
+@@ -69,6 +69,16 @@
+                     case Instruction.AtomicXor:
+                     case Instruction.Call:
+                     case Instruction.ImageAtomic:
++                    // NX2NAVI: a subgroup operation reads the other lanes, so it must stay where it was: moved into a
++                    // branch it sees only the lanes that took the branch (Ocarina's culling counted 1 of 32)
++                    case Instruction.Ballot:
++                    case Instruction.Shuffle:
++                    case Instruction.ShuffleDown:
++                    case Instruction.ShuffleUp:
++                    case Instruction.ShuffleXor:
++                    case Instruction.VoteAll:
++                    case Instruction.VoteAllEqual:
++                    case Instruction.VoteAny:
+                         return true;
+                 }
+             }

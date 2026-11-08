@@ -1,0 +1,84 @@
+# Code patches for Ocarina of Time (Switch 2) 1.1.1 main (recomp/patches.py). The sites were found in this build's
+# main; their original words are checked by the generator. runtime/widescreen.c writes the patch page and switches the
+# sets: +96 the game image size and +104 the scene size as {w, h} in one 64-bit word, +112 the 16:9 ratio a camera is
+# matched against, +116 the ratio that replaces it and +120 the tolerance of the match, as floats; +144 the bit
+# patterns of the UI's full-screen orthographic projection (m00 = 2 / 3840, m11 = 2 / 2160), +160..+175 and +208..+223
+# the four screen vtables that keep it, +176 the UI's horizontal squeeze (16:9 over the picture's ratio) in four lanes, +192 the
+# movie's margin on each side as a share of the width.
+#
+# The matrix-update, UI and movie sites: Copyright (c) 2026 Ivan0xFF (MIT; see THIRD_PARTY_NOTICES.md). Each is
+# written without branches or flags, as the generator's patch sites need. The set names differ from the other patch
+# files' (output, scene, aspect), whose page layout runtime/resolution.c owns.
+
+set wide_out    NX2NAVI_PATCH_WIDE_OUT    0
+set wide_scene  NX2NAVI_PATCH_WIDE_SCENE  0
+set wide_aspect NX2NAVI_PATCH_WIDE_ASPECT 0
+set wide_hud    NX2NAVI_PATCH_WIDE_HUD    0
+set wide_movie  NX2NAVI_PATCH_WIDE_MOVIE  0
+set res_fixed   NX2NAVI_PATCH_RES_FIXED   0
+set ostep       NX2NAVI_OCARINA_REALTIME  1
+
+# Real-time step: the framework's per-frame update (main+0x6e6be0) gives the time manager **[main+0x4c7e890] its
+# nominal frame through main+0x3b4e300 (+0x10 frames per update, +0x14 the inverse, +0x18 seconds, +0x1c the rate),
+# as 60 (or 30) over the target refresh rate it keeps, 60. Gameplay steps base (+0x1c0, 1.0) times frames per update,
+# the interface and the frame counter at update +0xd58 step frames per update, so above 60 fps all of it ran fast.
+# The update takes frames per update from the patch page instead: +256, the display interval in 60 Hz frames
+# (runtime/frame_rate.c). x10 is rewritten before it is read again, and the tst's flags feed only the fcsel.
+site ostep main 6e6cc0 1e220c21 @page:x10   # fcsel s1, s1, s2, eq -> adrp x10, page
+site ostep main 6e6cc4 1e201828 bd410148    # fdiv s8, s1, s0 -> ldr s8, [x10, #256]
+
+# Game image: the graphics setup (main+0x1202ce0) fills the renderer's configuration with the size of the picture the
+# game presents, 2560x1440 at every console mode (config +0x14, copied to renderer +0x9c, which main+0x346be50 reads
+# for the main render target set, main+0xf49040), and the display settings object (main+0x31f3890) stores the same size
+# at +0xb68.
+site wide_out main 1202ee0 d2814008 @page:x8   # mov x8, #0xa00 -> adrp x8, page
+site wide_out main 1202ee4 f2c0b408 f9403108   # movk x8, #0x5a0, lsl #32 -> ldr x8, [x8, #96]
+site wide_out main 31f39f4 d2814008 @page:x8   # mov x8, #0xa00 -> adrp x8, page
+site wide_out main 31f39f8 f2c0b408 f9403108   # movk x8, #0x5a0, lsl #32 -> ldr x8, [x8, #96]
+
+# Scene: the display settings object's scene size (+0xb70), 1920x1080, the picture the game's upscaler takes in.
+site wide_scene main 31f3a00 d280f008 @page:x8  # mov x8, #0x780 -> adrp x8, page
+site wide_scene main 31f3a04 f2c08708 f9403508  # movk x8, #0x438, lsl #32 -> ldr x8, [x8, #104]
+
+# Render scale: the game sizes its 3D scene by a dynamic-resolution controller that follows its GPU-time reports (3/4
+# of the picture here). Bit 0 of an engine config word at +0x94 picks it (main+0x805bd0); the other path takes a fixed
+# scale of 1.0 (main+0x806420). res_fixed always takes the fixed path and reads its scale from +240 (a float, written by
+# runtime/widescreen.c from the DLSS mode). It is switched on only once the controller has run for a while, as its
+# fields would otherwise stay unset and the scene stay black.
+site res_fixed main 805bd0 360041e8 1400020f            # tbz w8, #0, #0x80640c -> b #0x80640c
+site res_fixed main 806420 52a7f009 @page:x9 b940f129   # mov w9, #0x3f800000 -> adrp x9, page; ldr w9, [x9, #240]
+
+# Camera aspect ratio: the camera update (main+0x4c48c0, the same code as the camera update site in
+# recomp/patches-v143.txt) copies the camera's near, far, vertical angle and ratio (camera +0x134..+0x140) into the
+# sead perspective projection the renderer reads (+0x98..+0xb0; the projection's own matrix update, main+0x3485cc0, does
+# not run in play: the renderer builds its matrices from these fields). The replacement loads the ratio as before and
+# puts the page's ratio in its place when it is within the page's tolerance of 16:9 (the camera's value is not the bit
+# pattern of the 16/9 constant, and the tolerance is 0.01); other ratios stay the camera's. fabd + fcmge + bit
+# write no flags, so the alternatives agree. s1..s4 and x9 are free there: nothing reads them before the call at
+# main+0x4c534c.
+site wide_aspect main 4c5334 bd414260 bd414260 @page:x9 2d4e0921 bd407923 7ea1d404 7e24e464 2ea41c40   # ldr s0, [x19, #0x140]; ldp s1, s2, [x9, #112]; ldr s3, [x9, #120]; fabd s4, s0, s1; fcmge s4, s3, s4; bit v0, v2, v4
+
+# The same replacement where sead's perspective projection builds its matrix (doUpdateMatrix, main+0x3485cc0) and in
+# the three inlined copies of it the game mostly uses; the ratio goes back to the projection (+0xb0), so culling sees
+# the wider view. Ratios that are not 16:9 (cube maps, square views) are kept. Scratch: x9 and three s registers that
+# the next instructions overwrite before they read them.
+site wide_aspect main 3485cc0 2d558400 2d558400 @page:x9 2d4e0d22 bd407924 7ea2d422 7e22e482 2ea21c61 bd00b001   # doUpdateMatrix: ldp s0, s1, [x0, #0xac]
+site wide_aspect main 4f1e8 2d558ea0 2d558ea0 @page:x9 2d4e1524 bd407922 7ea4d464 7e24e444 2ea41ca3 bd00b2a3   # inlined matrix update: ldp s0, s3, [x21, #0xac]
+site wide_aspect main 23b9a8 2d558c00 2d558c00 @page:x9 2d4e1524 bd407922 7ea4d464 7e24e444 2ea41ca3 bd00b003   # inlined matrix update: ldp s0, s3, [x0, #0xac]
+site wide_aspect main 33b82c 2d558440 2d558440 @page:x9 2d4e1123 bd407922 7ea3d423 7e23e443 2ea31c81 bd00b041   # inlined matrix update: ldp s0, s1, [x2, #0xac]
+
+# HUD and menus: the 2D canvas setup (main+0x774330) multiplies a layout's projection by its view. When the projection
+# is the full-screen orthographic one of the 3840x2160 layout grid, its first row is scaled by 16:9 over the picture's
+# ratio, so the UI keeps its shape in the middle 16:9 of the picture, its edge elements at that area's edges, and the
+# markers that follow the 3D world stay on their targets. Screens whose canvas (+0x1b8 into the screen object) belongs
+# to the item-wheel background (vtable main+0x4bed098) or the pause and system menu backgrounds (main+0x4be4fb0) keep
+# it: they redraw a capture of the whole picture. So do the event and loading fades (UIEventFadeScreen
+# main+0x4be61c8, UILoadingFadeScreen main+0x4be7b30; the vtables that hold those names at +0x378): a fade is one colour,
+# and in the middle 16:9 alone it would leave the picture showing at the sides. Without branches: the two projection
+# words are compared in vector lanes, the screen's vtable is read from the canvas' screen only when they match (else from
+# the canvas itself, a readable address) and compared with the four on the page, and bit selects the scaled row. x16, x17 and v16..v19 are free (a leaf; v16..v19 are written next).
+site wide_hud main 774368 ad401041 ad401041 @page:x16 fd404a10 6e040431 6e0c2491 0ea0fa31 2eb08e31 2eb1ae31 0e040631 9e660231 d106e010 8a110210 8a310011 aa110210 fd400210 @page:x17 3dc02a32 3dc03633 4e080610 6ef28e12 6ef38e13 4eb31e52 6e124253 0eb31e52 0e721e31 4e040631 3dc02e33 6e33dc33 6eb11e61   # 2D canvas: ldp q1, q4, [x2]
+
+# Pre-rendered movies: the movie layer's draw (main+0x3b5c71c) builds a viewport over the whole picture (sead viewport
+# at x29 - 40: min x +8, max x +16); it moves in by the page's margin on each side, the middle 16:9 of the picture.
+site wide_movie main 3b5c758 a941a269 d100a3b0 bd400a10 bd401211 1e303a32 @page:x17 bd40c233 1e330a52 1e322a10 1e323a31 bd000a10 bd001211 a941a269   # movie layer viewport: ldp x9, x8, [x19, #0x18]

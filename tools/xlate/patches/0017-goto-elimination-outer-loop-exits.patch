@@ -1,0 +1,118 @@
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/GotoElimination.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/GotoElimination.cs
+@@ -1,4 +1,5 @@
+ using Ryujinx.Graphics.Shader.IntermediateRepresentation;
++using Ryujinx.Graphics.Shader.Translation;
+ using System;
+ using System.Collections.Generic;
+ using static Ryujinx.Graphics.Shader.StructuredIr.AstHelper;
+@@ -9,8 +10,12 @@
+     {
+         // This is a modified version of the algorithm presented on the paper
+         // "Taming Control Flow: A Structured Approach to Eliminating Goto Statements".
+-        public static void Eliminate(GotoStatement[] gotos)
++        // NX2NAVI: makes the flags RouteOuterExits needs (StructuredProgramContext.NewTemp).
++        [ThreadStatic] private static Func<AggregateType, AstOperand> _newTemp;
++
++        public static void Eliminate(GotoStatement[] gotos, Func<AggregateType, AstOperand> newTemp)
+         {
++            _newTemp = newTemp;
+             for (int index = gotos.Length - 1; index >= 0; index--)
+             {
+                 GotoStatement stmt = gotos[index];
+@@ -381,9 +386,84 @@
+                 first = next;
+             }
+ 
++            if (type == AstBlockType.DoWhile)
++            {
++                RouteOuterExits(newBlock);
++            }
++
+             return newBlock;
+         }
+ 
++        // NX2NAVI: a loop made here around statements that already hold a break or continue (made by MoveOutward or
++        // EncloseDoWhile for an enclosing loop) would take them as its own: the break then left only the new loop and
++        // the enclosing one never ended (a GPU hang in fragment shaders whose light loop holds a BRX switch, lowered to
++        // compares and branches by AmpereLowering). Each such exit now sets a flag and breaks the new loop; after it the
++        // flag repeats the exit for the enclosing loop.
++        private static void RouteOuterExits(AstBlock loop)
++        {
++            List<AstOperation> exits = [];
++
++            CollectExits(loop, exits);
++
++            if (exits.Count == 0 || _newTemp == null)
++            {
++                return;
++            }
++
++            AstBlock parent = loop.Parent;
++            AstOperand breakFlag = null, continueFlag = null;
++
++            foreach (AstOperation exit in exits)
++            {
++                bool isBreak = exit.Inst == Instruction.LoopBreak;
++                AstOperand flag = isBreak ? (breakFlag ??= _newTemp(AggregateType.Bool)) : (continueFlag ??= _newTemp(AggregateType.Bool));
++                AstBlock block = ParentBlock(exit);
++
++                block.AddBefore(exit, Assign(flag, Const(IrConsts.True)));
++
++                if (!isBreak)
++                {
++                    block.AddBefore(exit, new AstOperation(Instruction.LoopBreak));
++                    block.Remove(exit);
++                }
++            }
++
++            foreach (AstOperand flag in new[] { continueFlag, breakFlag })
++            {
++                if (flag == null)
++                {
++                    continue;
++                }
++
++                parent.AddBefore(loop, Assign(flag, Const(IrConsts.False)));
++
++                AstBlock check = new(AstBlockType.If, flag);
++
++                check.AddFirst(new AstOperation(flag == breakFlag ? Instruction.LoopBreak : Instruction.LoopContinue));
++
++                parent.AddAfter(loop, check);
++            }
++        }
++
++        // The breaks and continues in block that belong to a loop around it (those inside a nested loop are its own).
++        private static void CollectExits(AstBlock block, List<AstOperation> exits)
++        {
++            foreach (IAstNode node in block)
++            {
++                if (node is AstBlock child)
++                {
++                    if (child.Type != AstBlockType.DoWhile)
++                    {
++                        CollectExits(child, exits);
++                    }
++                }
++                else if (node is AstOperation op && (op.Inst == Instruction.LoopBreak || op.Inst == Instruction.LoopContinue))
++                {
++                    exits.Add(op);
++                }
++            }
++        }
++
+         private static bool BlockMatches(IAstNode node, AstBlockType type, IAstNode cond)
+         {
+             if (node is not AstBlock block)
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/StructuredProgram.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/StructuredProgram.cs
+@@ -68,7 +68,7 @@
+                     }
+                 }
+ 
+-                GotoElimination.Eliminate(context.GetGotos());
++                GotoElimination.Eliminate(context.GetGotos(), context.NewTemp);
+ 
+                 AstOptimizer.Optimize(context);
+ 

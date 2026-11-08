@@ -1,0 +1,89 @@
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+@@ -1856,11 +1856,25 @@
+         //               second-level block, 0 for none (block 0 stays zero)
+         //   word 65552  second-level blocks of 4096 entries, one per 4 KiB page: the record of the buffer that holds
+         //               the page, 0 for none
+-        //   records     two words each, the buffer's device address minus its GPU address (low word first); the host
+-        //               never changes a record a page names, so a page entry read at any time gives a whole one
+-        // The pointer addresses the 32-bit word at the address's 4-byte-aligned word.
++        //   words 3-4   the device address of a 4 KiB scratch buffer, where a twin write goes when the page has no twin
++        //   records     four words each: the device address of the buffer the page's accesses use minus its GPU address,
++        //               then the same for the page's twin, the pool's imported buffer in guest memory when the first is
++        //               its VRAM mirror (low words first); the host never changes a record a page names, so a page entry
++        //               read at any time gives a whole one
++        // The pointer addresses the 32-bit word at the address's 4-byte-aligned word. Stores also go to the twin
++        // (GetDeviceAddressPointers): what the GPU writes into a mirror through the table is not recorded as a GPU write,
++        // so without it the CPU never saw it and a sync of a CPU-written page copied the stale guest page over it
++        // (runtime/vk_gpa.c). Atomics do not: the twin's word may be stale (a counter the GPU reset with a buffer fill
++        // went on counting from its old value in guest memory), and that page's next sync copied the wrong count into
++        // the mirror, so culled instance lists drew garbage for a frame (flickering foliage).
+         private static SpvInstruction GetDeviceAddressPointer(CodeGenContext context, int binding, SpvInstruction low, SpvInstruction high)
+         {
++            return GetDeviceAddressPointers(context, binding, low, high, out _);
++        }
++
++        // twinPointer: the guest copy of a mirrored page, else the scratch buffer.
++        private static SpvInstruction GetDeviceAddressPointers(CodeGenContext context, int binding, SpvInstruction low, SpvInstruction high, out SpvInstruction twinPointer)
++        {
+             SpvInstruction u32 = context.TypeU32();
+             SpvInstruction u64 = context.TypeInt(64, 0);
+             SpvInstruction tableVar = context.StorageBuffers[binding];
+@@ -1879,16 +1893,26 @@
+             SpvInstruction page = context.BitwiseAnd(u32, context.ShiftRightLogical(u32, low, U(12)), U(0xfff));
+             SpvInstruction record = Word(context.IAdd(u32, context.IAdd(u32, context.IMul(u32, block, U(4096)), U(65552)), page));
+             SpvInstruction mapped = context.INotEqual(context.TypeBool(), record, U(0));
+-            SpvInstruction recordWord = context.IAdd(u32, Word(U(2)), context.IMul(u32, record, U(2)));
++            SpvInstruction recordWord = context.IAdd(u32, Word(U(2)), context.IMul(u32, record, U(4)));
+             SpvInstruction deltaLow = Word(recordWord);
+             SpvInstruction deltaHigh = Word(context.IAdd(u32, recordWord, U(1)));
++            SpvInstruction twinLow = Word(context.IAdd(u32, recordWord, U(2)));
++            SpvInstruction twinHigh = Word(context.IAdd(u32, recordWord, U(3)));
+ 
+             SpvInstruction wordLow = context.BitwiseAnd(u32, low, U(0xfffffffc));
+             SpvInstruction device = context.IAdd(u64, Wide(wordLow, high), Wide(deltaLow, deltaHigh));
+             SpvInstruction dummy = context.IAdd(u64, Wide(Word(U(0)), Word(U(1))), context.UConvert(u64, context.BitwiseAnd(u32, low, U(0xffc))));
+             SpvInstruction address = context.Select(u64, mapped, device, dummy);
+ 
+-            return context.ConvertUToPtr(context.TypePointer(StorageClass.PhysicalStorageBuffer, u32), address);
++            SpvInstruction boolType = context.TypeBool();
++            SpvInstruction sameTwin = context.LogicalAnd(boolType, context.IEqual(boolType, twinLow, deltaLow), context.IEqual(boolType, twinHigh, deltaHigh));
++            SpvInstruction hasTwin = context.LogicalAnd(boolType, mapped, context.LogicalNot(boolType, sameTwin));
++            SpvInstruction twinDevice = context.IAdd(u64, Wide(wordLow, high), Wide(twinLow, twinHigh));
++            SpvInstruction scratch = context.IAdd(u64, Wide(Word(U(3)), Word(U(4))), context.UConvert(u64, context.BitwiseAnd(u32, low, U(0xffc))));
++            SpvInstruction ptrType = context.TypePointer(StorageClass.PhysicalStorageBuffer, u32);
++            twinPointer = context.ConvertUToPtr(ptrType, context.Select(u64, hasTwin, twinDevice, scratch));
++
++            return context.ConvertUToPtr(ptrType, address);
+         }
+ 
+         private static SpvInstruction LoadAligned(CodeGenContext context, SpvInstruction type, SpvInstruction pointer)
+@@ -1912,7 +1936,7 @@
+             SpvInstruction u32 = context.TypeU32();
+             SpvInstruction low = context.Get(AggregateType.U32, operation.GetSource(1));
+             SpvInstruction high = context.Get(AggregateType.U32, operation.GetSource(2));
+-            SpvInstruction pointer = GetDeviceAddressPointer(context, binding, low, high);
++            SpvInstruction pointer = GetDeviceAddressPointers(context, binding, low, high, out SpvInstruction twin);
+             StorageKind kind = operation.StorageKind;
+             int bits = kind is StorageKind.GlobalMemoryS8 or StorageKind.GlobalMemoryU8 ? 8
+                 : kind is StorageKind.GlobalMemoryS16 or StorageKind.GlobalMemoryU16 ? 16 : 32;
+@@ -1921,7 +1945,9 @@
+             {
+                 if (isStore)
+                 {
+-                    StoreAligned(context, pointer, context.Get(AggregateType.U32, operation.GetSource(operation.SourcesCount - 1)));
++                    SpvInstruction stored = context.Get(AggregateType.U32, operation.GetSource(operation.SourcesCount - 1));
++                    StoreAligned(context, pointer, stored);
++                    StoreAligned(context, twin, stored);
+                     return OperationResult.Invalid;
+                 }
+ 
+@@ -1939,6 +1965,8 @@
+                 SpvInstruction semantics = context.Constant(u32, 0);
+                 context.AtomicAnd(u32, pointer, scope, semantics, context.Not(u32, mask));
+                 context.AtomicOr(u32, pointer, scope, semantics, context.ShiftLeftLogical(u32, value, shift));
++                context.AtomicAnd(u32, twin, scope, semantics, context.Not(u32, mask));
++                context.AtomicOr(u32, twin, scope, semantics, context.ShiftLeftLogical(u32, value, shift));
+                 return OperationResult.Invalid;
+             }
+ 

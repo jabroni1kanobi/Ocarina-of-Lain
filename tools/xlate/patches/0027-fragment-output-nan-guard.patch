@@ -1,0 +1,18 @@
+--- a/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs
+@@ -495,6 +495,15 @@
+ 
+                         Operand src = Register(regIndexBase + component, RegisterType.Gpr);
+ 
++                        // NX2NAVI: a float colour output carries no NaN or infinity on to its target: one NaN texel spreads
++                        // through the averages of bloom, blur and downsample passes into blocks of black or white. NaN
++                        // becomes 0 and the rest is clamped to +-1e30; integer targets keep their bits.
++                        if ((TranslatorContext.Definitions.GetFragmentOutputColorType(rtIndex) & AggregateType.ElementTypeMask) == AggregateType.FP32)
++                        {
++                            Operand clamped = this.FPMinimum(this.FPMaximum(src, ConstF(-1e30f)), ConstF(1e30f));
++                            src = this.ConditionalSelect(this.IsNan(src), ConstF(0f), clamped);
++                        }
++
+                         // Perform B <-> R swap if needed, for BGRA formats (not supported on OpenGL).
+                         if (!supportsBgra && (component == 0 || component == 2))
+                         {

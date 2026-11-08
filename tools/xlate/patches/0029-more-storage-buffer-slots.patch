@@ -1,0 +1,60 @@
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+@@ -281,7 +281,15 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                             }
+                             else
+                             {
+-                                Utils.DeleteNode(node, operation);
++                                // NX2NAVI: the store becomes an unused copy in place instead of leaving the list: the
++                                // loop goes on from node.Next, which a removed node no longer has, so every global
++                                // access after it in the block stayed global and failed the whole translation.
++                                for (int srcIndex = 0; srcIndex < operation.SourcesCount; srcIndex++)
++                                {
++                                    operation.SetSource(srcIndex, null);
++                                }
++
++                                node.Value = new Operation(Instruction.Copy, Local(), Const(0));
+                             }
+                         }
+                         else
+--- a/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
+@@ -22,7 +22,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+         private readonly SetBindingPair[] _cbSlotToBindingMap;
+         private readonly SetBindingPair[] _sbSlotToBindingMap;
+-        private uint _sbSlotWritten;
++        private ulong _sbSlotWritten;
+ 
+         private readonly Dictionary<int, int> _sbSlots;
+         private readonly Dictionary<int, int> _sbSlotsReverse;
+@@ -66,7 +66,10 @@ namespace Ryujinx.Graphics.Shader.Translation
+             _stagePrefix = GetShaderStagePrefix(stage);
+ 
+             _cbSlotToBindingMap = new SetBindingPair[32];   // NX2NAVI: slots 18-31 for Transforms/MotionPrevious.cs
+-            _sbSlotToBindingMap = new SetBindingPair[16];
++            // NX2NAVI: 64 storage buffer slots (the width of _sbSlotWritten), not 16: Ocarina's NVN2 compute programs
++            // reach more than 16 buffers through their pushed pointers and pointer tables, and every access to a buffer
++            // past the 16th found no slot.
++            _sbSlotToBindingMap = new SetBindingPair[64];
+             _cbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
+             _sbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
+ 
+@@ -193,7 +196,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+             if (write)
+             {
+-                _sbSlotWritten |= 1u << slot;
++                _sbSlotWritten |= 1ul << slot;
+             }
+ 
+             binding = setAndBinding.Binding;
+@@ -503,7 +506,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 if (setAndBinding.Binding >= 0)
+                 {
+                     (int sbCbSlot, int sbCbOffset) = UnpackSbCbInfo(key);
+-                    BufferUsageFlags flags = (_sbSlotWritten & (1u << slot)) != 0 ? BufferUsageFlags.Write : BufferUsageFlags.None;
++                    BufferUsageFlags flags = (_sbSlotWritten & (1ul << slot)) != 0 ? BufferUsageFlags.Write : BufferUsageFlags.None;
+                     descriptors[descriptorIndex++] = new BufferDescriptor(setAndBinding.SetIndex, setAndBinding.Binding, slot, sbCbSlot, sbCbOffset, flags);
+                 }
+             }

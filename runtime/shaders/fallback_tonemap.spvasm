@@ -1,0 +1,92 @@
+; Scale and decode for the untranslatable scene upscaler (runtime/vk_exec_draw.c untranslated_dispatch_fallback).
+; Its input is the post pass's picture with each channel stored as the square root of its linear value (prog 102 packs
+; sqrt(composite) into RGB9E5), and its output is linear (the HUD is drawn over it, the frame's last pass encodes to
+; sRGB). So: filter in the stored (sqrt) values, as the game's upscaler does, then square. The pass replaced a
+; decode with the sRGB curve, which darkened mid-tones and lifted the darkest values.
+; Written in SPIR-V assembly (spirv-as; no GLSL compiler in the build). As GLSL:
+;   layout(local_size_x = 8, local_size_y = 8) in;
+;   layout(binding = 0) uniform sampler2D src;              // the stored picture (linear filtering)
+;   layout(binding = 1, rgba16f) uniform writeonly image2D dst;   // the pass output (vk_tonemap.c), blitted into the target
+;   layout(push_constant) uniform P { vec2 inv; float unused; float pad; ivec2 size; } pc;
+;   void main() {
+;       ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+;       if (p.x >= pc.size.x || p.y >= pc.size.y) return;
+;       vec3 s = textureLod(src, (vec2(p) + 0.5) * pc.inv, 0.0).rgb;
+;       imageStore(dst, p, vec4(s * s, 1.0));
+;   }
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gid %src %dst %pc
+               OpExecutionMode %main LocalSize 8 8 1
+               OpDecorate %gid BuiltIn GlobalInvocationId
+               OpDecorate %src DescriptorSet 0
+               OpDecorate %src Binding 0
+               OpDecorate %dst DescriptorSet 0
+               OpDecorate %dst Binding 1
+               OpDecorate %dst NonReadable
+               OpDecorate %P Block
+               OpMemberDecorate %P 0 Offset 0
+               OpMemberDecorate %P 1 Offset 8
+               OpMemberDecorate %P 2 Offset 12
+               OpMemberDecorate %P 3 Offset 16
+       %void = OpTypeVoid
+     %fnvoid = OpTypeFunction %void
+      %float = OpTypeFloat 32
+        %int = OpTypeInt 32 1
+       %uint = OpTypeInt 32 0
+       %bool = OpTypeBool
+     %v2float = OpTypeVector %float 2
+     %v3float = OpTypeVector %float 3
+     %v4float = OpTypeVector %float 4
+      %v2int = OpTypeVector %int 2
+     %v3uint = OpTypeVector %uint 3
+     %v2uint = OpTypeVector %uint 2
+     %ptr_in_v3uint = OpTypePointer Input %v3uint
+        %gid = OpVariable %ptr_in_v3uint Input
+     %img2d = OpTypeImage %float 2D 0 0 0 1 Unknown
+     %simg2d = OpTypeSampledImage %img2d
+     %ptr_uc_simg = OpTypePointer UniformConstant %simg2d
+        %src = OpVariable %ptr_uc_simg UniformConstant
+     %stimg = OpTypeImage %float 2D 0 0 0 2 Rgba16f
+     %ptr_uc_stimg = OpTypePointer UniformConstant %stimg
+        %dst = OpVariable %ptr_uc_stimg UniformConstant
+          %P = OpTypeStruct %v2float %float %float %v2int
+     %ptr_pc_P = OpTypePointer PushConstant %P
+         %pc = OpVariable %ptr_pc_P PushConstant
+     %ptr_pc_v2float = OpTypePointer PushConstant %v2float
+     %ptr_pc_v2int = OpTypePointer PushConstant %v2int
+      %int_0 = OpConstant %int 0
+      %int_3 = OpConstant %int 3
+    %float_0 = OpConstant %float 0
+    %float_1 = OpConstant %float 1
+  %float_half = OpConstant %float 0.5
+     %v2half = OpConstantComposite %v2float %float_half %float_half
+     %v2bool = OpTypeVector %bool 2
+       %main = OpFunction %void None %fnvoid
+      %entry = OpLabel
+         %g3 = OpLoad %v3uint %gid
+         %gu = OpVectorShuffle %v2uint %g3 %g3 0 1
+          %p = OpBitcast %v2int %gu
+      %psize = OpAccessChain %ptr_pc_v2int %pc %int_3
+       %size = OpLoad %v2int %psize
+         %ge = OpSGreaterThanEqual %v2bool %p %size
+        %out = OpAny %bool %ge
+               OpSelectionMerge %body None
+               OpBranchConditional %out %done %body
+       %done = OpLabel
+               OpReturn
+       %body = OpLabel
+         %pf = OpConvertSToF %v2float %p
+        %pfh = OpFAdd %v2float %pf %v2half
+       %pinv = OpAccessChain %ptr_pc_v2float %pc %int_0
+        %inv = OpLoad %v2float %pinv
+         %uv = OpFMul %v2float %pfh %inv
+         %si = OpLoad %simg2d %src
+         %s4 = OpImageSampleExplicitLod %v4float %si %uv Lod %float_0
+         %s3 = OpVectorShuffle %v3float %s4 %s4 0 1 2
+         %tc = OpFMul %v3float %s3 %s3
+         %o4 = OpCompositeConstruct %v4float %tc %float_1
+         %di = OpLoad %stimg %dst
+               OpImageWrite %di %p %o4
+               OpReturn
+               OpFunctionEnd

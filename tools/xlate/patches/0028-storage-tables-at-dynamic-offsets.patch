@@ -1,0 +1,147 @@
+--- a/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
+@@ -145,6 +145,20 @@
+             return Properties.AddLocalMemory(new MemoryDefinition(name, type, arrayLength));
+         }
+ 
++        // NX2NAVI: the constant buffer slot that was given this binding, -1 when none was (no binding is created).
++        public int GetConstantBufferSlotOfBinding(int binding)
++        {
++            for (int slot = 0; slot < _cbSlotToBindingMap.Length; slot++)
++            {
++                if (_cbSlotToBindingMap[slot].Binding == binding)
++                {
++                    return slot;
++                }
++            }
++
++            return -1;
++        }
++
+         public int GetConstantBufferBinding(int slot)
+         {
+             SetBindingPair setAndBinding = _cbSlotToBindingMap[slot];
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+@@ -709,6 +709,11 @@
+                 }
+             }
+ 
++            if (targetCbs.Count == 0)
++            {
++                AddTableCandidates(resourceManager, operation.GetSource(0), targetCbs);
++            }
++
+             targetCbs.Sort();
+ 
+             if (targetCbs.Count == 0)
+@@ -862,6 +867,109 @@
+             return "undef";
+         }
+ 
++        // NX2NAVI: a base read from a constant buffer at a run-time offset is an entry of a table of {u64 address, u32
++        // size} descriptors (Ocarina's NVN2 compute picks a storage slot of c0's table by index: c0[x * 16 + 0xa0],
++        // c0[{5,6,7} << 4]). Every entry the offset can reach becomes a candidate of the multi-target helper, which uses
++        // the one whose range holds the address: E + C gives C, C + 16 ... C + 240; phi(constants) << 4 gives each.
++        private static void AddTableCandidates(ResourceManager resourceManager, Operand address, List<uint> targetCbs)
++        {
++            Operation load = FindDynamicCbLoad(address, 4);
++
++            if (load == null || load.SourcesCount < 3 || load.GetSource(0).Type != OperandType.Constant)
++            {
++                return;
++            }
++
++            int slot = resourceManager.GetConstantBufferSlotOfBinding(load.GetSource(0).Value);
++
++            if (slot < 0)
++            {
++                return;
++            }
++
++            // vecIndex = (E >> 2) >> 2 (EmitLoadConstant): E is the byte offset
++            Operand vec = load.GetSource(2);
++
++            if (vec.AsgOp is not Operation sh1 || sh1.Inst != Instruction.ShiftRightU32 ||
++                sh1.GetSource(0).AsgOp is not Operation sh2 || sh2.Inst != Instruction.ShiftRightU32)
++            {
++                return;
++            }
++
++            Operand e = sh2.GetSource(0);
++            List<int> offsets = [];
++
++            if (e.AsgOp is Operation add && add.Inst == Instruction.Add)
++            {
++                Operand c = add.GetSource(1).Type == OperandType.Constant ? add.GetSource(1) : add.GetSource(0);
++
++                if (c.Type == OperandType.Constant && (c.Value & 15) == 0)
++                {
++                    for (int k = 0; k < 16; k++)
++                    {
++                        offsets.Add(c.Value + k * 16);
++                    }
++                }
++            }
++            else if (e.AsgOp is Operation shl && shl.Inst == Instruction.ShiftLeft &&
++                     shl.GetSource(1).Type == OperandType.Constant && shl.GetSource(1).Value == 4 &&
++                     shl.GetSource(0).AsgOp is PhiNode phi)
++            {
++                for (int i = 0; i < phi.SourcesCount; i++)
++                {
++                    if (phi.GetSource(i).Type == OperandType.Constant)
++                    {
++                        offsets.Add(phi.GetSource(i).Value * 16);
++                    }
++                }
++            }
++
++            foreach (int offset in offsets)
++            {
++                if (offset >= 0 && offset < 0x10000)
++                {
++                    uint packed = PackCbSlotAndOffset(slot, offset);
++
++                    if (!targetCbs.Contains(packed))
++                    {
++                        targetCbs.Add(packed);
++                    }
++                }
++            }
++        }
++
++        // The constant buffer load with a non-constant offset an address is built on (through Add and Copy), or null.
++        private static Operation FindDynamicCbLoad(Operand value, int depth)
++        {
++            if (depth < 0 || value.AsgOp is not Operation op)
++            {
++                return null;
++            }
++
++            if (op.Inst == Instruction.Load && op.StorageKind == StorageKind.ConstantBuffer && op.SourcesCount >= 3 &&
++                op.GetSource(2).Type != OperandType.Constant)
++            {
++                return op;
++            }
++
++            if (op.Inst != Instruction.Add && op.Inst != Instruction.Copy)
++            {
++                return null;
++            }
++
++            for (int i = 0; i < op.SourcesCount; i++)
++            {
++                Operation found = FindDynamicCbLoad(op.GetSource(i), depth - 1);
++
++                if (found != null)
++                {
++                    return found;
++                }
++            }
++
++            return null;
++        }
++
+         private static uint PackCbSlotAndOffset(int cbSlot, int cbOffset)
+         {
+             return (uint)((ushort)cbSlot | ((ushort)cbOffset << 16));
