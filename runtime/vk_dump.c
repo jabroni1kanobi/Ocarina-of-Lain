@@ -788,7 +788,22 @@ static uint64_t targets_sig(const VkExec *ex) {
 // Sets pass_skip for the pass or dispatch being logged and counts it when it copies.
 static void pass_decide(int same_targets) {
     if (frame_now() != dump_frame) copied = 0;
-    pass_skip = copied >= MAX_PASSES ? "pass cap" : same_targets ? "same targets as the previous pass" : NULL;
+    static int from = -1;   // NX2NAVI_DUMP_FROM=<pass>: earlier passes are logged, not copied (a dump of the frame's end on a small disk)
+    if (from < 0) { const char *e = cfg_get("NX2NAVI_DUMP_FROM"); from = e ? atoi(e) : 0; }
+    // NX2NAVI_DUMP_ONLY=<pass>,<pass>,...: only these passes are copied
+    int listed = 1;
+    const char *only = cfg_get("NX2NAVI_DUMP_ONLY");
+    if (only && *only) {
+        listed = 0;
+        for (const char *q = only; *q;) {
+            char *end;
+            long v = strtol(q, &end, 10);
+            if (end == q) break;
+            listed |= v == seq - 1;
+            q = *end ? end + 1 : end;
+        }
+    }
+    pass_skip = !listed ? "not in NX2NAVI_DUMP_ONLY" : seq < from ? "before NX2NAVI_DUMP_FROM" : copied >= MAX_PASSES ? "pass cap" : same_targets ? "same targets as the previous pass" : NULL;
     if (!pass_skip) copied++;
 }
 
@@ -954,6 +969,8 @@ static void open_files(void) {
     if (!passes_f || !images_f) rt_fatal("vk_dump: cannot write to %s", dir);
 }
 
+static uint64_t dump_every;   // NX2NAVI_DUMP_EVERY
+
 void vk_dump_init(void) {
     const char *e = cfg_get("NX2NAVI_DUMP");
     dump_white = rt_knob("DUMP_WHITE", "0");
@@ -984,6 +1001,9 @@ void vk_dump_init(void) {
     snprintf(base_dir, sizeof base_dir, "%s", d && *d ? d : "dump");
     snprintf(dir, sizeof dir, "%s", base_dir);
     char path[600];
+    const char *ev = cfg_get("NX2NAVI_DUMP_EVERY");   // <frames>: dump again that many frames later, each in dir/f<frame>
+    dump_every = ev && *ev && !dump_white ? strtoull(ev, NULL, 10) : 0;
+    if (dump_every) snprintf(dir, sizeof dir, "%s/f%llu", base_dir, (unsigned long long)dump_frame);
     if (!dump_white) open_files();
     const char *bf = cfg_get("NX2NAVI_DUMP_BUF");
     if (bf && *bf) {
@@ -1053,6 +1073,17 @@ void vk_dump_present(uint64_t frame) {
     passes_f = NULL;
     rt_log("vk_dump: frame %llu: %d passes and dispatches, about %llu MB of PNGs in %s", (unsigned long long)frame, seq,
            (unsigned long long)(png_bytes >> 20), dir);
+    if (dump_every) {
+        plat_mutex_lock(&rec_lock);
+        seq = copied = 0, last_targets = 0, pass_skip = NULL, png_bytes = 0;
+        nluts = nluts_done = nents = ents_over = pass_draws = 0;
+        dump_frame = frame + dump_every;
+        snprintf(dir, sizeof dir, "%s/f%llu", base_dir, (unsigned long long)dump_frame);
+        open_files();
+        finished = 0;
+        plat_mutex_unlock(&rec_lock);
+        return;
+    }
     if (dump_white) {   // ready for another attempt (vk_dump_present checks this one's thumbnail 3 presents on)
         white_last = frame;
         plat_mutex_lock(&rec_lock);
