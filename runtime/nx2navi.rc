@@ -2,4 +2,4 @@
    the installer window). tools/build_game.py compiles it with the runtime objects, so it is also a member of
    libnx2navirt.a, which the release links with --whole-archive. */
 1 24 "nx2navi.manifest"
-1 ICON "nx2navi.ico"
+1 ICON "ocarina-of-lain.ico"

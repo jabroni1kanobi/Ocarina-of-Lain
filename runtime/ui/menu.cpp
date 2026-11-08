@@ -1158,7 +1158,7 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
     // where it would run into the title (a narrow window, a long title)
     char game[16], version[96];
     snprintf(game, sizeof game, "%d.%d.%d", rt_game_version / 100, rt_game_version / 10 % 10, rt_game_version % 10);
-    snprintf(version, sizeof version, "NX2navi %s  -  game %s", rt_port_version, game);
+    snprintf(version, sizeof version, "Ocarina of Lain 1.0");
     float version_x = win_s.x - ImGui::GetStyle().WindowPadding.x - ImGui::CalcTextSize(version).x;
     if (win_p.x + version_x >= title_end + ImGui::GetStyle().ItemSpacing.x * 2) {
         ImGui::SameLine(version_x);

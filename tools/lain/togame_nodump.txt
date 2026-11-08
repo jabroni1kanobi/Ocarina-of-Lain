@@ -1,0 +1,10 @@
+# title -> New Game only, then hands off for the intro
+1500 A 8
+1620 A 8
+1740 A 8
+1860 A 8
+1980 A 8
+2100 A 8
+2220 A 8
+2340 A 8
+2460 A 8

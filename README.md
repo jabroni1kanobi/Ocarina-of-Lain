@@ -1,81 +1,64 @@
-<p align="center"><img src="docs/images/navi.png" alt="NX2navi" width="160"></p>
+# Ocarina of Lain
 
-# NX2navi
+A build of **NX2navi by chrg6**, the native PC recompilation of Ocarina of Time for Switch 2, with fixes for AMD graphics cards.
 
-**NX2navi** is a static recompilation of *The Legend of Zelda: Ocarina of Time* for Nintendo Switch 2 (game
-version 1.1.1) into a native x86-64 application for Windows, with a Vulkan renderer
-([docs/architecture.md](docs/architecture.md)).
+**All credit for the port goes to chrg6.** This repo is chrg6's source plus the changes listed below, and it is not the official NX2navi. Please take problems with this build here, not to chrg6. chrg6's original README is at [docs/NX2navi-README.md](docs/NX2navi-README.md), and chrg6's `LICENSE` and `LICENSE-ADDITIONS` files apply and are unchanged.
 
-> [!IMPORTANT]
-> **No game files are included.** You need your own legally obtained copy of the game, dumped from your own console.
-> Instructions for obtaining those files will not be provided.
->
-> The game is built from your files on your machine, so the result contains the game. It is for your own use. Do not share it.
+chrg6's permission for this repo: *"You have full permissions to provide the code under your own GitHub repo, but you must name it something else. Reference work taken from me, but do not advertise your build as NX2Native."*
 
-## Status
+No game files are in this repo. You need your own copy of the game.
 
-Early development, playable. Kokiri Forest, Kakariko Village, Death Mountain Trail and its crater, the Temple of
-Time and the Great Fairy fountains play at 60 fps and above on current GPUs, from the title screen and from saves.
-Visual bugs and occasional crashes are still expected ([Known issues](#known-issues)).
+## What we changed
 
-Report problems as issues, following [CONTRIBUTING.md](CONTRIBUTING.md).
+| Fix | What you see | Where |
+|---|---|---|
+| Image fetches clamped to the image | The pale stepped box near the screen edges is gone, and the fog stays | `spirv_fetch_clamp` in `runtime/gfx_shader.c` |
+| Float bits kept on mesh and task shaders | Leaf shadows no longer cover the whole shadow map: large GPU saving in wide outdoor views | `spirv_float_bits` in `runtime/gfx_shader.c` |
+| Frame wait after the first submission | Flashes in Kokiri gone. Set `submit_finish = 0x1` in `nx2navi.ini` | your `nx2navi.ini` |
+| AVX2 game code | Faster CPU side (optional, see step 4) | `tools/lain/build_guest.py` |
+| New name and icon | Window title, settings menu, icon | `runtime/gfx_window_win.c`, `runtime/ui/menu.cpp`, `runtime/ocarina-of-lain.ico` |
 
-## Features
+The box's cause: the ground fog shader projects a point to the screen and reads depth there. Near the left, right and top edges that point is off screen, which Vulkan leaves undefined, and on an RX 9070 those pixels took a different lighting path. The full investigation is in [docs/lain-findings.md](docs/lain-findings.md).
 
-- Native code, not emulation
-- 60 fps by default, or a limit of 30 to 240 fps, the display's refresh rate or unlimited
-- Native widescreen and ultrawide (the window's shape, 21:9 or 32:9) with the HUD, menus and movies kept 16:9
-- Resolutions above the game's 1440p: 1800p, 4K, 5K or the window's own size, sharp on high-DPI displays
-- Upscaling and anti-aliasing: NVIDIA DLSS (DLAA, Quality, Balanced, Performance, Ultra Performance; RTX GPUs) or
-  AMD FSR 3.1 (Native AA and the same modes; any GPU), which render the 3D scene at the mode's share and keep the HUD
-  sharp; or AMD FSR 1 or bilinear scaling to the window, with a sharpness setting; black bars or stretch
-- Frame generation with AMD FSR 3.1 (any GPU): a generated frame between every two the game draws, with the HUD kept
-  out of it, for about twice the frame rate on a fast display; in a window of another shape than the picture, frames
-  are generated inside the picture only, so the black bars stay clean
-- HDR on HDR displays: the game's own native HDR, or an enhanced HDR made from its SDR picture
-- Every shader prepared when the game is built, and the pipelines met in play built again in the background at each
-  start, so play does not stop to compile them; a draw that must wait for its pipeline has it built on worker
-  threads, never on the game's drawing thread
-- In-game settings menu (F1, or Minus and Plus together on a gamepad) and performance overlay (F10)
-- Keyboard, mouse and gamepads with remapping, Nintendo or Xbox button layout, rumble and gyro; the game follows
-  whichever connected gamepad you press
-- Stereo or 5.1 surround sound output
-- Docked or handheld console mode
-- The game's textures stay compressed (BC3, about half the video memory at the same speed) unless the PC has 20 GiB of
-  video memory and 48 GiB of RAM, as Windows counts video memory against the system's commit limit
+## Results
 
-## Installing
+Tested on one PC only: Radeon RX 9070, driver 26.10.1, at 2560x1440.
 
-Download `NX2navi-Setup-<version>.exe` from the releases and start it next to your `.nup` dump. It is the only file
-you need. The launcher it
-installs finds the dump, downloads the build tools, builds the game on your PC (10 to 25 minutes, once) and starts
-it; afterwards it keeps the port up to date and rebuilds only what changed ([docs/launcher.md](docs/launcher.md)).
-[docs/README-BuildKit.md](docs/README-BuildKit.md) describes the same build by hand, [docs/building.md](docs/building.md)
-building from source. Settings are in the in-game menu and in `nx2navi.ini` ([nx2navi.ini.example](nx2navi.ini.example)
-lists every key). Controls: [docs/controls.md](docs/controls.md).
+| Scene | Original 0.5.0 | Ocarina of Lain |
+|---|---|---|
+| Kokiri Forest, heavy wide view | frame about 39 ms, GPU 24 ms | frame about 18 ms, GPU about 8 ms |
+| Deku Tree cutscene | GPU 31 ms | frame 16.7 ms, GPU 7.5 ms (measured before the box fix) |
 
-Requirements: Windows 10 or later; an x86-64 CPU with SSE4.2 (AVX2/FMA machines get a faster build); 16 GB of RAM; about
-30 GB free for the game and 1.5 GB for the launcher and its tools; a GPU with Vulkan 1.3, `VK_EXT_external_memory_host`
-and `VK_EXT_mesh_shader`. The setup is not signed, so SmartScreen warns on its first start.
+The flash meter found no flashes in 1,600 frames of the Deku Tree scene. In Kokiri it found only small spikes, about 1% of the picture, and the same ones appear with the box fix turned off.
 
-## Known issues
+## Known problems
 
-- The first start after an install or update, and the first visit to an area, can pause briefly while the graphics
-  driver builds what it has not seen; later starts are smooth.
-- A rare crash in the game's particle code.
-- DLSS Frame Generation is not offered yet: AMD FSR 3.1 frame generation works on every GPU, NVIDIA's included.
+- Falling leaves, and parts of Link at times, show a ghosting effect. Some leaves draw black.
+- Kokiri's heavy view is about 55 fps, not a locked 60. The limit there is CPU time.
+- Only tested on the PC above. Other cards may behave differently.
 
-## License
+## Build it
 
-The source is public to read. Its additions and changes are all rights reserved ([LICENSE-ADDITIONS](LICENSE-ADDITIONS)):
-no part of them may be copied or published without written permission. The base import stays under its
-[MIT License](LICENSE), and third-party code keeps its own license ([THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
-No license grants anything for Nintendo's game.
+You need Windows, about 60 GB free, and your own game. The scripts relink the runtime against a working NX2navi install, so the install does the heavy work.
 
-NX2navi is an independent, non-commercial fan project, not affiliated with or endorsed by Nintendo. *The Legend
-of Zelda*, *Ocarina of Time* and *Nintendo Switch* are trademarks of Nintendo.
+1. Install **NX2navi 0.5.0** with chrg6's launcher and let it build the game from your own files. Run it once.
+2. Install Python 3.12 or newer. Clone this repo into a folder named `src` (for example `C:\Users\you\Games\nx2navi-src\src`).
+3. Copy `tools/lain/build_rt.py` and `tools/lain/build_guest.py` up one level, next to `src`. Edit the paths at the top of both to match your PC: `ROOT`, `GAME`, `CACHE`, `MSYS`. They currently hold the paths from the PC this was built on.
+4. Optional, faster on CPUs with AVX2: `python build_guest.py`. It writes `guest-x86-64-v3-O1`, and step 5 links it with `--guest`.
+5. Build: `python build_rt.py --setup --guest guest-x86-64-v3-O1 --out exe-ms.exe`. Leave out `--guest ...` if you skipped step 4. The result is `out\exe-ms.exe`.
+6. Install: in the NX2navi `game` folder, back up `ocarina.exe`, then copy `exe-ms.exe` over it, keeping the name `ocarina.exe` so the launcher still starts it.
+7. In `nx2navi.ini`, under `[performance]`, set `submit_finish = 0x1`.
 
-## Building from source
+A launcher update overwrites the exe: repeat step 6 afterwards.
 
-[docs/building.md](docs/building.md) lists the toolchain and the steps. Everything the build writes stays under
-`build\` and `generated\`, which git ignores; run `tools/check_content.py` before a commit.
+## Switches
+
+Set as environment variables:
+
+- `NX2NAVI_FETCH_CLAMP=0` turns the box fix off.
+- `NX2NAVI_FLOAT_BITS` is a mask: 1 mesh and task (default), 2 vertex, 4 fragment, 8 compute. All stages at once gave a burst of noise in an older test.
+- `NX2NAVI_MESH_INVARIANT=1` marks mesh positions invariant. Off by default, not tested yet.
+
+## Test tools
+
+`tools/lain/` holds the scripts used to test: `rgp_run.ps1` (one run), `ab.ps1` (alternating timing runs), `metrics.py`, `flash3.py` (flash meter), and the shader debug helpers. They hold paths from the build PC, so edit them first. They contain no game data.

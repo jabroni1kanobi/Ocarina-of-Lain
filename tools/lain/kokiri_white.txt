@@ -1,0 +1,9 @@
+# profile-kokiri: title -> Continue -> Load (top slot) -> confirm -> Kokiri gameplay, then a camera turn and a walk (white-frame count, no dump)
+1500 A 8
+1800 A 8
+2400 A 8
+2700 A 8
+4600 RSTICK 14000 0 900
+5600 LSTICK 0 20000 600
+6300 LSTICK 20000 0 400
+6800 RSTICK -14000 0 700
