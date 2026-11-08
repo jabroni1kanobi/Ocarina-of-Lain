@@ -1306,7 +1306,7 @@ static void perf_tick(uint64_t now, const MenuTarget *t) {
         if (g_perf_win_ns >= 500000000ull) {
             double out = gfx_output_fps();   // with frame generation: the display's rate too
             if (out > 0)
-                snprintf(g_perf_text, sizeof g_perf_text, menu_text(UI_PERF_LINE_FPS_FG), g_perf_frames * 1e9 / g_perf_win_ns, out);
+                snprintf(g_perf_text, sizeof g_perf_text, menu_text(UI_PERF_LINE_FPS), out);   // one number: what the screen shows
             else
                 snprintf(g_perf_text, sizeof g_perf_text, menu_text(UI_PERF_LINE_FPS), g_perf_frames * 1e9 / g_perf_win_ns);
             g_perf_win_ns = g_perf_max_ns = 0;
