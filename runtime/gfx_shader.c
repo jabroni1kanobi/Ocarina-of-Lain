@@ -580,7 +580,10 @@ static void spirv_float_bits(uint32_t **spirv, uint64_t *words, int stage) {
            MODE_DENORM_PRESERVE = 4459, MODE_NAN_PRESERVE = 4461, MAX_ENTRIES = 8 };
     static const char ext[] = "SPV_KHR_float_controls";   // 22 characters and the terminator: 6 words
     static int on = -1;
-    if (on < 0) on = rt_knob("FLOAT_BITS", "1");
+    if (on < 0) {   // a mask, so not rt_knob, which only answers 0, 1 or 2
+        const char *e = cfg_get("NX2NAVI_FLOAT_BITS");
+        on = e && *e ? (int)strtol(e, NULL, 0) : 1;
+    }
     int bit = stage == GFX_STAGE_MS || stage == GFX_STAGE_TS ? 1 : stage == GFX_STAGE_VS ? 2 : stage == GFX_STAGE_FS ? 4 : stage == GFX_STAGE_CS ? 8 : 0;
     if (!(on & bit)) return;
     const uint32_t *w = *spirv;
@@ -624,6 +627,113 @@ static void spirv_float_bits(uint32_t **spirv, uint64_t *words, int stage) {
     static volatile int32_t marked;
     int32_t c = plat_inc32(&marked);
     if (c == 1 || c % 500 == 0) rt_log("gfx_shader: %d modules keep raw float bits so far (float controls)", c);
+}
+
+// NX2NAVI_MESH_INVARIANT=1: mesh stages decorate their Position as Invariant, as translator patch 0007 does for vertex
+// stages. Without it two programs may compute one position differently, and a depth test against an earlier pass fails
+// in spots. In memory only, like spirv_float_bits.
+static void spirv_mesh_invariant(uint32_t **spirv, uint64_t *words, int stage) {
+    enum { OP_DECORATE = 71, DEC_BUILTIN = 11, DEC_INVARIANT = 18, BUILTIN_POSITION = 0 };
+    static int on = -1;
+    if (on < 0) on = rt_knob("MESH_INVARIANT", "0");
+    if (!on || stage != GFX_STAGE_MS) return;
+    const uint32_t *w = *spirv;
+    uint64_t n = *words;
+    for (uint64_t i = 5; i < n; i += w[i] >> 16) {
+        if ((w[i] & 0xffff) != OP_DECORATE || w[i] >> 16 != 4 || w[i + 2] != DEC_BUILTIN || w[i + 3] != BUILTIN_POSITION) continue;
+        uint32_t *o = malloc((n + 3) * 4);
+        if (!o) rt_fatal("gfx_shader: out of memory");
+        memcpy(o, w, (i + 4) * 4);
+        o[i + 4] = 3u << 16 | OP_DECORATE, o[i + 5] = w[i + 1], o[i + 6] = DEC_INVARIANT;
+        memcpy(o + i + 7, w + i + 4, (n - i - 4) * 4);
+        free(*spirv);
+        *spirv = o, *words = n + 3;
+        return;
+    }
+}
+
+// NX2NAVI_FETCH_CLAMP=0 turns this off. A texelFetch outside its image is undefined in Vulkan, and the game does it: the
+// ground fog (fs 560e3938562c8966) projects a point to the screen and fetches depth there, and near the screen's left,
+// right and top edges that point is off screen. On an RX 9070 those pixels took the shader's other ambient path, which
+// drew a stepped pale box about 5% in from the edges of the picture. So every fetch is clamped to its image: coord =
+// clamp(coord, 0, size - 1). In memory only, like spirv_float_bits. Cube images are left alone (no fetch from them exists).
+static void spirv_fetch_clamp(uint32_t **spirv, uint64_t *words) {
+    enum { OP_EXT_IMPORT = 11, OP_EXT_INST = 12, OP_CAPABILITY = 17, OP_TYPE_INT = 21, OP_TYPE_VECTOR = 23, OP_TYPE_IMAGE = 25,
+           OP_CONSTANT = 43, OP_CONSTANT_COMPOSITE = 44, OP_CONSTANT_NULL = 46, OP_FUNCTION = 54, OP_LOAD = 61, OP_COPY = 83,
+           OP_IMAGE_FETCH = 95, OP_IMAGE = 100, OP_QUERY_SIZE_LOD = 103, OP_QUERY_SIZE = 104, OP_ISUB = 130,
+           CAP_IMAGE_QUERY = 50, DIM_3D = 2, DIM_CUBE = 3, DIM_RECT = 4, DIM_BUFFER = 5, MASK_LOD = 2, GLSL_SCLAMP = 45 };
+    static int on = -1;
+    if (on < 0) on = rt_knob("FETCH_CLAMP", "1");
+    if (!on) return;
+    const uint32_t *w = *spirv;
+    uint64_t n = *words, first_cap = 0, first_func = 0, fetches = 0;
+    uint32_t bound = w[3], glsl = 0, int_s = 0, vec[5] = {0}, has_query = 0;
+    uint32_t *type_of = calloc(bound, 4), *image_info = calloc(bound, 4);   // image_info: comps | dim << 8 | ms << 16, plus 1
+    if (!type_of || !image_info) rt_fatal("gfx_shader: out of memory");
+    for (uint64_t i = 5; i < n; i += w[i] >> 16) {
+        uint32_t op = w[i] & 0xffff;
+        if (op == OP_CAPABILITY) {
+            if (!first_cap) first_cap = i;
+            has_query |= w[i + 1] == CAP_IMAGE_QUERY;
+        } else if (op == OP_EXT_IMPORT && !strcmp((const char *)(w + i + 2), "GLSL.std.450")) glsl = w[i + 1];
+        else if (op == OP_TYPE_INT && w[i + 2] == 32 && w[i + 3] == 1) int_s = w[i + 1];
+        else if (op == OP_TYPE_VECTOR && w[i + 2] == int_s && int_s && w[i + 3] <= 4) vec[w[i + 3]] = w[i + 1];
+        else if (op == OP_TYPE_IMAGE) {
+            uint32_t dim = w[i + 3], comps = dim == DIM_3D ? 3 : dim == DIM_CUBE ? 0 : dim == 1 || dim == DIM_RECT ? 2 : 1;
+            image_info[w[i + 1]] = (comps ? comps + w[i + 5] : 0) | dim << 8 | w[i + 6] << 16 | 1u << 24;
+        } else if (op == OP_LOAD || op == OP_IMAGE || op == OP_COPY) type_of[w[i + 2]] = w[i + 1];
+        else if (op == OP_FUNCTION && !first_func) first_func = i;
+        else if (op == OP_IMAGE_FETCH) fetches++;
+    }
+    vec[1] = int_s;
+    if (!fetches || !glsl || !int_s || !first_cap || !first_func) goto out;
+    uint32_t *o = malloc((n + 40 + fetches * 18) * 4);
+    if (!o) rt_fatal("gfx_shader: out of memory");
+    uint32_t zero[5], one[5], lod0 = bound++, one1 = bound++;
+    for (int c = 1; c <= 4; c++) zero[c] = bound++, one[c] = c == 1 ? one1 : bound++;
+    uint64_t k = 0;
+    memcpy(o, w, 5 * 4), k = 5;
+    for (uint64_t i = 5; i < n; i += w[i] >> 16) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (i == first_cap && !has_query) o[k++] = 2u << 16 | OP_CAPABILITY, o[k++] = CAP_IMAGE_QUERY;
+        if (i == first_func) {
+            o[k++] = 4u << 16 | OP_CONSTANT, o[k++] = int_s, o[k++] = lod0, o[k++] = 0;
+            o[k++] = 4u << 16 | OP_CONSTANT, o[k++] = int_s, o[k++] = one1, o[k++] = 1;
+            for (int c = 1; c <= 4; c++) {
+                if (!vec[c]) continue;
+                o[k++] = 3u << 16 | OP_CONSTANT_NULL, o[k++] = vec[c], o[k++] = zero[c];
+                if (c == 1) continue;
+                o[k++] = (uint32_t)(3 + c) << 16 | OP_CONSTANT_COMPOSITE, o[k++] = vec[c], o[k++] = one[c];
+                for (int d = 0; d < c; d++) o[k++] = one1;
+            }
+        }
+        uint32_t info = 0, comps = 0;
+        if (op == OP_IMAGE_FETCH) {
+            info = type_of[w[i + 3]] ? image_info[type_of[w[i + 3]]] : 0;
+            comps = info & 0xff;
+        }
+        if (!info || comps < 1 || comps > 4 || !vec[comps]) {   // not a fetch, or one this cannot name the types of
+            memcpy(o + k, w + i, len * 4), k += len;
+            continue;
+        }
+        uint32_t ty = vec[comps], dim = info >> 8 & 0xff, ms = info >> 16 & 0xff, size = bound++, hi = bound++, cl = bound++;
+        int by_size = ms || dim == DIM_RECT || dim == DIM_BUFFER;
+        uint32_t mask = len > 5 ? w[i + 5] : 0, lod = mask & MASK_LOD ? w[i + 6] : lod0;
+        if (by_size) o[k++] = 4u << 16 | OP_QUERY_SIZE, o[k++] = ty, o[k++] = size, o[k++] = w[i + 3];
+        else o[k++] = 5u << 16 | OP_QUERY_SIZE_LOD, o[k++] = ty, o[k++] = size, o[k++] = w[i + 3], o[k++] = lod;
+        o[k++] = 5u << 16 | OP_ISUB, o[k++] = ty, o[k++] = hi, o[k++] = size, o[k++] = one[comps];
+        o[k++] = 8u << 16 | OP_EXT_INST, o[k++] = ty, o[k++] = cl, o[k++] = glsl, o[k++] = GLSL_SCLAMP, o[k++] = w[i + 4];
+        o[k++] = zero[comps], o[k++] = hi;
+        memcpy(o + k, w + i, len * 4), o[k + 4] = cl, k += len;
+    }
+    o[3] = bound;
+    free(*spirv);
+    *spirv = o, *words = k;
+    static volatile int32_t marked;
+    int32_t c = plat_inc32(&marked);
+    if (c == 1 || c % 500 == 0) rt_log("gfx_shader: %d modules have their image fetches clamped so far", c);
+out:
+    free(type_of), free(image_info);
 }
 
 // Reads <key>.spv and <key>.res.json from the pack (packed 1) or the loose files; NULL if either is missing or
@@ -678,6 +788,8 @@ static GfxShader *disk_load_from(const uint8_t key[32], const uint8_t *iid, int 
     reflect(s);
     if (s->stage == GFX_STAGE_FS) vk_hdr_shader_swap(&s->spirv, &s->words);   // the in-memory copy; the cache keeps its own
     spirv_float_bits(&s->spirv, &s->words, s->stage);
+    spirv_mesh_invariant(&s->spirv, &s->words, s->stage);
+    spirv_fetch_clamp(&s->spirv, &s->words);
     return s;
 }
 

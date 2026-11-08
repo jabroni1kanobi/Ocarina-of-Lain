@@ -267,6 +267,15 @@ static void write_images(const Job *j) {
         snprintf(path, sizeof path, "%s/%s%s.png", dir, j->name, pass ? "_tm" : "");
         rt_write_png(path, out, pw, ph);
     }
+    if (mode == M_FLOAT && j->f->nc == 4) {   // ..._a.png: the alpha channel, which the images above drop
+        for (uint64_t i = 0; i < n; i++) {
+            out[4 * i] = out[4 * i + 1] = out[4 * i + 2] = u8(px[4 * i + 3]);
+            out[4 * i + 3] = 255;
+        }
+        char path[600];
+        snprintf(path, sizeof path, "%s/%s_a.png", dir, j->name);
+        rt_write_png(path, out, pw, ph);
+    }
     uint64_t all = distinct(j, 0, j->h), top = distinct(j, 0, j->h / 4 ? j->h / 4 : 1);
     plat_mutex_lock(&img_lock);
     if (images_f) {
