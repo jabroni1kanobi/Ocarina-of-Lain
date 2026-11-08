@@ -1,10 +1,10 @@
 // Discord Rich Presence: "Playing NX2navi" with the elapsed play time in the player's Discord status, through
 // the local IPC of a running Discord client (platform.h's plat_ipc_*). Nothing leaves the machine but the activity
 // itself, and nothing is sent while NX2NAVI_DISCORD_RPC is off (the default: the status is information about the
-// player's session). NX2NAVI_DISCORD_APP_ID names the application whose name and artwork Discord shows — the default
-// is the project's own application, registered as "NX2navi"; a player who wants their own name or
-// art registers an application at discord.com/developers and puts its id in nx2navi.ini — and NX2NAVI_DISCORD_IMAGE the
-// key of its uploaded art asset.
+// player's session). NX2NAVI_DISCORD_APP_ID names the application whose name ("Playing <name>") and artwork Discord
+// shows, NX2NAVI_DISCORD_IMAGE the key of its uploaded art asset; both default to discord_app.h, the one place the
+// NX2navi application's id is written, and nx2navi.ini's discord_app_id and discord_image override them. With no
+// application id at all the thread stays idle and logs that once: there is nothing to show the status under.
 //
 // One host thread owns the connection and never holds a virtual core (kernel.c: host work runs without one). It
 // re-reads the settings when cfg_version changes (a menu change reaches it within half a second), connects to the
@@ -54,15 +54,23 @@ static int valid_image_key(const char *s) {
 }
 
 // The setting's value, or its default when the value does not fit the protocol (logged: the player sees why their
-// own app does not show). Called on the presence thread and by the probe, after cfg_version changed or once.
+// own app does not show), or "" when the default does not fit either (an application id discord_app.h leaves
+// empty). Called on the presence thread and by the probe, after cfg_version changed or once.
 static void read_setting(const char *name, char *out, size_t cap, int (*valid)(const char *)) {
-    const char *v = cfg_value(name);
+    const char *v = cfg_value(name), *def = cfg_meta(name)->def;
     if (valid(v)) {
         snprintf(out, cap, "%s", v);
         return;
     }
-    snprintf(out, cap, "%s", cfg_meta(name)->def);
-    rt_log("discord: %s does not fit what the Rich Presence protocol takes; using %s", name + strlen("NX2NAVI_"), out);
+    snprintf(out, cap, "%s", valid(def) ? def : "");
+    if (*v && strcmp(v, def))
+        rt_log("discord: %s does not fit what the Rich Presence protocol takes; using %s", name + strlen("NX2NAVI_"),
+               *out ? out : "none");
+}
+
+static void log_no_app_id(void) {
+    rt_log("discord: no application id: set discord_app_id in nx2navi.ini, or NX2NAVI_DISCORD_APP_ID_DEFAULT in "
+           "runtime/discord_app.h, to the id of the Discord application named NX2navi");
 }
 
 static void le32(uint8_t *at, uint32_t v) {
@@ -157,7 +165,7 @@ static uint32_t next_nonce(void) {
     return (uint32_t)plat_inc32(&n);
 }
 
-// The activity as one SET_ACTIVITY frame: the game update and the port version as the details line ("Game 1.4.3 ·
+// The activity as one SET_ACTIVITY frame: the game update and the port version as the details line ("Game 1.1.1 ·
 // Recomp 0.3.7": the port version without its +commit suffix, the art's hover text keeps the full one; the dot goes
 // as a JSON escape), the process's start as the timestamp Discord counts the elapsed time from, and the application's
 // art asset. 1 when the client answered (a slow answer that ran out of the 2 s read is fine: the next drain takes
@@ -189,7 +197,7 @@ static void discord_main(void *arg) {
     read_setting("NX2NAVI_DISCORD_IMAGE", image, sizeof image, valid_image_key);
     PlatIpc *ipc = NULL;
     uint64_t retry_at = 0, send_at = 0;
-    int said_no_client = 0;
+    int said_no_client = 0, said_no_app = 0;
     for (;;) {
         unsigned v = cfg_version();
         if (v != seen) {   // the settings changed (the menu writes them): pick the new ones up at once
@@ -197,10 +205,16 @@ static void discord_main(void *arg) {
             read_setting("NX2NAVI_DISCORD_APP_ID", app_id, sizeof app_id, valid_app_id);
             read_setting("NX2NAVI_DISCORD_IMAGE", image, sizeof image, valid_image_key);
             if (ipc) plat_ipc_close(ipc), ipc = NULL;   // the new app id needs a new handshake; the image is resent
-            said_no_client = 0;
+            said_no_client = said_no_app = 0;
         }
         if (!cfg_bool("NX2NAVI_DISCORD_RPC")) {
             if (ipc) plat_ipc_close(ipc), ipc = NULL;
+            plat_sleep_ms(500);
+            continue;
+        }
+        if (!app_id[0]) {   // on, but no application to show it under: wait for a settings change
+            if (!said_no_app) log_no_app_id();
+            said_no_app = 1;
             plat_sleep_ms(500);
             continue;
         }
@@ -243,6 +257,11 @@ int probe_discord(void) {
     char app_id[APP_ID_CAP], image[IMAGE_KEY_CAP];
     read_setting("NX2NAVI_DISCORD_APP_ID", app_id, sizeof app_id, valid_app_id);
     read_setting("NX2NAVI_DISCORD_IMAGE", image, sizeof image, valid_image_key);
+    if (!app_id[0]) {
+        log_no_app_id();
+        fprintf(stderr, "discord: probe skipped: no application id (runtime/discord_app.h or discord_app_id)\n");
+        return 0;
+    }
     PlatIpc *p = connect_client(app_id);
     if (!p) {
         fprintf(stderr, "discord: probe skipped: no client on discord-ipc-0..9\n");

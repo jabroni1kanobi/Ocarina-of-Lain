@@ -1,0 +1,43 @@
+--- a/src/Ryujinx.Graphics.Shader/Translation/Transforms/ShufflePass.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Transforms/ShufflePass.cs
+@@ -30,14 +30,38 @@
+                 return node;
+             }
+ 
+-            int functionId = context.Hfm.GetOrCreateShuffleFunctionId(functionName, context.GpuAccessor.QueryHostSubgroupSize());
+-
+             Operand result = operation.GetDest(0);
+             Operand valid = operation.GetDest(1);
+             Operand value = operation.GetSource(0);
+             Operand index = operation.GetSource(1);
+             Operand mask = operation.GetSource(2);
+ 
++            // NX2NAVI: SHFL.IDX over the whole warp (mask 0x1f: clamp 31, no segments) on a 32-lane host is the subgroup
++            // shuffle itself, for an index up to 31, else the lane keeps its value. Inline, not a call of the general
++            // helper (about 55 instructions once inlined): the tensor lowering (tools/xlate/AmpereLowering.cs Hmma)
++            // shuffles thousands of times per program, and the driver took minutes over the inlined helpers.
++            if (functionName == HelperFunctionName.Shuffle && mask.Type == OperandType.Constant && mask.Value == 0x1f &&
++                context.GpuAccessor.QueryHostSubgroupSize() == 32)
++            {
++                Operand inRange = Local();
++                Operand shuffled = Local();
++                node.List.AddBefore(node, new Operation(Instruction.CompareLessOrEqualU32, inRange, index, Const(31)));
++                node.List.AddBefore(node, new Operation(Instruction.Shuffle, shuffled, value, index));
++                if (valid != null)
++                {
++                    node.List.AddBefore(node, new Operation(Instruction.Copy, valid, inRange));
++                }
++
++                LinkedListNode<INode> selectNode = node.List.AddBefore(node, new Operation(Instruction.ConditionalSelect, result, inRange, shuffled, value));
++
++                operation.Dest = null;
++                Utils.DeleteNode(node, operation);
++
++                return selectNode;
++            }
++
++            int functionId = context.Hfm.GetOrCreateShuffleFunctionId(functionName, context.GpuAccessor.QueryHostSubgroupSize());
++
+             operation.Dest = null;
+ 
+             Operand[] callArgs = [Const(functionId), value, index, mask, valid];

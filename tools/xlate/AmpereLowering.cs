@@ -390,6 +390,7 @@ static class AmpereLowering
                 case 0x941: // BSYNC
                 case 0x942: // BREAK
                 case 0x948: // WARPSYNC
+                case 0x9ab: // ERRBAR: waits for earlier memory errors to be reported, which the host GPU does not do here
                     return;
 
                 case 0x202: case 0x802: case 0xa02: case 0xc02: Mov_(op); return;
@@ -410,7 +411,8 @@ static class AmpereLowering
                 case 0x388: case 0x984: case 0x988: SharedAccess(op); return;
                 case 0x83b: Ldsm(); return;
                 case 0xb1d: Bar(); return;
-                case 0x305: case 0xb05: case 0xd05: F2i(op); return;
+                case 0x992: Membar(); return;
+                case 0x305: case 0x905: case 0xb05: case 0xd05: F2i(op); return;
                 case 0xb82: Ldc(); return;
                 case 0x381: case 0x981: Ldg(op); return;
                 case 0x386: case 0x986: Stg(op); return;
@@ -1136,7 +1138,9 @@ static class AmpereLowering
             uint dstSize = _i.Bits(75, 2), srcSize = _i.Bits(84, 2);
             if ((w2 & ~known) != 0 || dstSize > 2 || srcSize is not 1 and not 2 || (srcSize == 1 && _i.Bits(60, 2) != 0))
                 throw Fail("F2I format");
-            var (b, abs, neg) = Raw(1, SB);
+            int b; bool abs, neg;
+            if (op == 0x905) { Mov32i(SB, _i.W1); (b, abs, neg) = (SB, false, false); }   // F2I of a 32-bit immediate
+            else (b, abs, neg) = Raw(1, SB);
             uint fmt = dstSize | (_i.Bit(72) ? 4u : 0u);   // ISrcDstFmt: U8 0, U16 1, U32 2, +4 signed
             EmitG(0x5cb0000000000000UL | ((ulong)b << 20) | (uint)Gpr((uint)Dst) | ((ulong)(fmt & 3) << 8) | ((ulong)(fmt >> 2) << 12)
                   | ((ulong)srcSize << 10) | ((ulong)_i.Bits(78, 2) << 39) | ((ulong)_i.Bits(80, 1) << 44)
@@ -1386,20 +1390,29 @@ static class AmpereLowering
         // before an aggregated shared atomic: @!Pd per-lane ATOMS, else REDUX and one): Pd = every active lane holds Ra's
         // value, Rd = the active-lane mask then, else 0. Lowered as VOTE.ANY (the active lanes), FLO (the highest of
         // them), SHFL.IDX (that lane's value), ISETP.EQ into Pd and VOTE.ALL over Pd. Only the unguarded form with a
-        // predicate destination is taken.
+        // predicate destination is taken. Bit 73 is .U64: Ra:Ra+1 is compared, the high word ANDed into Pd.
         void Match()
         {
             uint pd = _i.Bits(81, 3);
-            if (_i.W1 != 0 || (_i.W2 & ~(7u << 17)) != 0 || _i.Bits(12, 4) != 7 || pd == PT)
+            bool wide = _i.Bit(73);
+            if (_i.W1 != 0 || (_i.W2 & ~(7u << 17 | 1u << 9)) != 0 || _i.Bits(12, 4) != 7 || pd == PT)
                 throw Fail("MATCH mode");
             int d = Gpr((uint)Dst), src = Gpr(_i.Bits(24, 8));
-            const int ballot = 240, lead = 241, value = 242;
+            if (wide && (src == RZ || (src & 1) != 0)) throw Fail("MATCH.U64 register pair");
+            const int ballot = 240, lead = 241, value = 242, valueHi = 243;
             Emit(Unguarded(0x50d8000000000000UL | (1UL << 48) | (7UL << 45) | ((ulong)PT << 39) | ballot));        // VOTE.ANY
             Emit(Unguarded(0x5c30000000000000UL | ((ulong)ballot << 20) | lead));                                    // FLO.U32
             Emit(Unguarded(0xef10000000000000UL | (7UL << 48) | (31UL << 34) | (1UL << 29) | ((ulong)lead << 20)
                            | ((ulong)src << 8) | value));                                                            // SHFL.IDX
             Emit(Unguarded(0x5b60000000000000UL | (2UL << 49) | ((ulong)PT << 39) | ((ulong)value << 20)
                            | ((ulong)src << 8) | ((ulong)pd << 3) | PT));                                            // ISETP.EQ.U32
+            if (wide)
+            {
+                Emit(Unguarded(0xef10000000000000UL | (7UL << 48) | (31UL << 34) | (1UL << 29) | ((ulong)lead << 20)
+                               | ((ulong)(src + 1) << 8) | valueHi));                                                // SHFL.IDX
+                Emit(Unguarded(0x5b60000000000000UL | (2UL << 49) | ((ulong)pd << 39) | ((ulong)valueHi << 20)
+                               | ((ulong)(src + 1) << 8) | ((ulong)pd << 3) | PT));                                  // ISETP.EQ.U32.AND
+            }
             Emit(Unguarded(0x50d8000000000000UL | ((ulong)pd << 45) | ((ulong)pd << 39) | RZ));                     // VOTE.ALL
             if (d != RZ) Sel(d, ballot, RZ, pd, false);
         }
@@ -1818,6 +1831,11 @@ static class AmpereLowering
             if (_i.W1 != 0 || (_i.W2 & ~0x10000u) != 0 || _i.Bits(12, 4) != 7) throw Fail("BAR mode");
             Emit(Unguarded(0xf0a8000000000000UL | (1UL << 43) | (1UL << 44) | (7UL << 39)));
         }
+
+        // MEMBAR: Maxwell MEMBAR.GL whatever the scope. A barrier at least as wide as the one asked for orders the same
+        // accesses; the decoder reads MEMBAR's level from bits 8-9 (CTA 0, GL 1, SYS 2), and the SPIR-V it makes is a
+        // device-scope memory barrier for GL and SYS alike.
+        void Membar() => Emit(Unguarded(0xef98000000000000UL | (1UL << 8)));
 
         // ISETP.EX: the high-word half of a 64-bit compare. The low words' result is the predicate of bits 68-71; EQ is
         // (high equal AND low), NE (high different OR low), an ordering (high strictly ordered OR (high equal AND low)),
@@ -2281,7 +2299,9 @@ static class AmpereLowering
                 {
                     var p = _code[k];
                     uint op = p.Bits(0, 12), b = op & 0x1ff;
-                    if (b is >= 0x140 and <= 0x15f) return -1;   // control flow: not straight-line
+                    // control flow: not straight-line. BSSY, BSYNC and WARPSYNC branch nowhere and write no register: the
+                    // compiler puts a BSSY for the switch's reconvergence between the IMNMX bound and the SHL.
+                    if (b is >= 0x140 and <= 0x15f && op is not 0x945 and not 0x941 and not 0x948) return -1;
                     // uniform datapath: ULDC, UMOV and the U* ALU ops (base 0x080-0x0bf; UISETP/UPLOP3 write predicates)
                     bool isUr = op is 0xab9 or 0xabb or 0x882 or 0xc82 || (b is >= 0x080 and < 0x0c0 && b != 0x08c && b != 0x09c);
                     if (p.Bits(16, 8) == reg && isUr == ur) return k;

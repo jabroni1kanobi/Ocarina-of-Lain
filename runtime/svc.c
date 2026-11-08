@@ -246,6 +246,7 @@ static void svc_body(Cpu *c, uint32_t imm, uint64_t pc) {
         fs_save_flush();
         vk_pipeline_save();
         prof_write();
+        rtss_limit_restore();
         fflush(NULL);
         if (svc_test_exit_hook) return svc_test_exit_hook(0);
         plat_exit(0);

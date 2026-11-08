@@ -52,6 +52,7 @@
 #include "host.h"
 #include "layout.h"
 #include "platform/platform.h"
+#include "vk_fg.h"
 
 #define STEP_SAMPLES 5
 #define STEP_MAX_S (1.0 / 15.0)    // longest step; a longer frame slows the game down
@@ -180,13 +181,28 @@ static void frame_limit_live(void) {
     else rt_log("frame rate: limit at the monitor's refresh rate (60 until the window measures it)");
 }
 
+// RivaTuner Statistics Server (rtss_limit.c) gets the same limit; while it limits this process the pacer holds no
+// frames, so the two never stack. NX2NAVI_RTSS=0 and frame generation (RTSS would count the generated frames) keep it out.
 uint64_t frame_step_cap_ns(void) {
     frame_limit_live();
-    if (limit_hz == -2) return 0;   // unlimited: the pacer does not hold frames
+    static int rtss = -1;
+    if (rtss < 0) {
+        const char *e = cfg_get("NX2NAVI_RTSS");
+        rtss = !(e && !strcmp(e, "0")) && !vk_fg_wanted();
+    }
+    if (limit_hz == -2) {   // unlimited: the pacer does not hold frames, and RTSS's limit is cleared
+        rtss_limit_want(rtss ? 0 : -1);
+        return 0;
+    }
     double hz = limit_hz ? limit_hz : gfx_window_refresh_hz();
     if (hz < LIMIT_MIN_HZ) hz = 60;   // display rate unknown (no window yet)
     double max = frame_free_running() ? LIMIT_FREE_MAX_HZ : LIMIT_MAX_HZ;
     if (hz > max) hz = max;
+    // Frame generation presents a generated frame between each two of the game's (vk_fg.cpp): the game is paced at
+    // half the limit then, so the screen shows the limit
+    if (vk_fg_generating()) hz /= 2;
+    rtss_limit_want(rtss ? (int64_t)(hz * 1000 + 0.5) : -1);
+    if (rtss_limit_active()) return 0;
     return (uint64_t)(1e9 / hz + 0.5);
 }
 

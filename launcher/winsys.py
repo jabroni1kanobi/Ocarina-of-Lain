@@ -35,6 +35,96 @@ def app_id():
             pass
 
 
+GWL_STYLE, GWL_EXSTYLE = -16, -20
+WS_MINIMIZEBOX, WS_SYSMENU = 0x00020000, 0x00080000
+WS_EX_APPWINDOW, WS_EX_TOOLWINDOW = 0x00040000, 0x00000080
+
+
+def _hwnd(root):
+    """The Win32 window of a Tk toplevel (the wrapper around Tk's child window)."""
+    user32 = ctypes.windll.user32
+    user32.GetParent.restype = ctypes.c_void_p
+    user32.GetParent.argtypes = [ctypes.c_void_p]
+    return user32.GetParent(root.winfo_id()) or root.winfo_id()
+
+
+def _post(hwnd, msg, wparam, lparam):
+    """Queue a message for the window instead of sending it. A sent message runs the window's handler inside this
+    ctypes call, which has released Python's lock; when that handler dispatches Tk events (the move loop of a title
+    bar drag does), Tk calls back into Python without the lock and Python aborts. A posted message is handled by Tk's
+    own event loop, where calling back into Python is allowed."""
+    user32 = ctypes.windll.user32
+    user32.PostMessageW.restype = ctypes.c_int
+    user32.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
+    return user32.PostMessageW(hwnd, msg, wparam, lparam)
+
+
+def frameless(root):
+    """Windows: drop the system title bar (the window draws its own), but keep a taskbar button, Alt+Tab, minimise
+    from the taskbar and Alt+F4. False elsewhere, where the window keeps its frame."""
+    if os.name != 'nt':
+        return False
+    try:
+        root.overrideredirect(True)
+        root.update_idletasks()
+        user32 = ctypes.windll.user32
+        get, put = user32.GetWindowLongPtrW, user32.SetWindowLongPtrW
+        get.restype, get.argtypes = ctypes.c_ssize_t, [ctypes.c_void_p, ctypes.c_int]
+        put.restype, put.argtypes = ctypes.c_ssize_t, [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+        hwnd = _hwnd(root)
+        put(hwnd, GWL_EXSTYLE, (get(hwnd, GWL_EXSTYLE) & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW)
+        put(hwnd, GWL_STYLE, get(hwnd, GWL_STYLE) | WS_MINIMIZEBOX | WS_SYSMENU)
+        root.withdraw()            # the taskbar takes a changed window style only when the window is shown again
+        root.after(10, root.deiconify)
+        return True
+    except (AttributeError, OSError, Exception):
+        return False
+
+
+def minimize(root):
+    """Tk refuses to iconify a window without a frame, so ask Windows; asynchronously, for the reason in _post."""
+    if os.name == 'nt':
+        ctypes.windll.user32.ShowWindowAsync(ctypes.c_void_p(_hwnd(root)), 6)   # SW_MINIMIZE
+    else:
+        root.iconify()
+
+
+def start_drag(root):
+    """Windows: let the system move the window from the mouse's current press (as on a title bar, with snapping).
+    False elsewhere: the caller moves the window itself."""
+    if os.name != 'nt':
+        return False
+    try:
+        ctypes.windll.user32.ReleaseCapture()
+        return bool(_post(_hwnd(root), 0x00A1, 2, 0))   # WM_NCLBUTTONDOWN, HTCAPTION
+    except (AttributeError, OSError):
+        return False
+
+
+_ICONS = []
+
+
+def set_window_icon(root, ico):
+    """Windows: the window's and the taskbar button's icon, straight from an .ico (the large and the small size)."""
+    if os.name != 'nt':
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        user32.LoadImageW.restype = ctypes.c_void_p
+        user32.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_int, ctypes.c_int,
+                                      ctypes.c_uint]
+        hwnd = _hwnd(root)
+        for which, (mx, my) in ((1, (11, 12)), (0, (49, 50))):   # ICON_BIG: SM_CXICON; ICON_SMALL: SM_CXSMICON
+            h = user32.LoadImageW(None, str(ico), 1, user32.GetSystemMetrics(mx), user32.GetSystemMetrics(my),
+                                  0x10)   # IMAGE_ICON, LR_LOADFROMFILE
+            if h:
+                _ICONS.append(h)
+                _post(hwnd, 0x0080, which, h)   # WM_SETICON
+        return True
+    except (AttributeError, OSError):
+        return False
+
+
 def register_font(path):
     """Make a font file usable by this process only (Tk then finds it by family name). True on success."""
     path = str(path)

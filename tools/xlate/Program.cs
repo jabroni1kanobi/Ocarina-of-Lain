@@ -181,6 +181,10 @@ static class SwshXlate
                             MaxPrimitives = (int)mj["maxp"], Topology = (int)mj["topo"], PayloadBytes = (int)mj["payload"],
                             HasTask = mj["task"] is JsonValue tv && tv.TryGetValue<bool>(out bool tb) && tb,
                         };
+                        // The size field counts 256-byte units, and some task programs and the mesh programs they feed
+                        // carry 0 there while the payload is used (the task writes the mesh count at +4, the mesh reads
+                        // ISBERD region 7 at 0x10 and 0x14): a payload under 256 bytes rounds down. One unit covers it.
+                        if ((mesh.Stage == 6 || mesh.HasTask) && mesh.PayloadBytes == 0) mesh.PayloadBytes = 256;
                         code = AmpereLowering.Lower(code, size, false, out int meshLocal, null, mesh);
                         if (meshLocal != 0) job["local_mem"] = meshLocal;
                         job["local"] = new JsonArray(mesh.Threads, 1, 1);

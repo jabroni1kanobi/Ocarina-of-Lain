@@ -139,9 +139,15 @@ def states(app):
     def uninstall():
         app.show('uninstall', 0)
 
+    def import_saves():
+        app.release, app.message = None, ''
+        app.save_message = ('Save imported: 3 files from 0100000000010000. Your old save is in '
+                            'saves\\backup 2026-11-08 17.30.12.')
+        app.show('home', next(i for i, r in enumerate(app.rows_home()) if r.label == 'Import Saves'))
+
     return [('1-first-run', first_run), ('2-installing', installing), ('3-home', home),
             ('4-update-ready', update_ready), ('5-updating', updating), ('6-settings', settings),
-            ('7-build-failed', failed), ('8-uninstall', uninstall)]
+            ('7-build-failed', failed), ('8-uninstall', uninstall), ('9-import-saves', import_saves)]
 
 
 def run(app, shots):

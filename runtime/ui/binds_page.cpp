@@ -192,13 +192,14 @@ static void capture_window(void) {
     if (!ImGui::IsPopupOpen("##bind_capture")) ImGui::OpenPopup("##bind_capture");
     uint64_t now = plat_now_ns();
     bool pad_cell = g_cap.cell == 2;
+    // the timeout first: a press polled after it would compare with a held state long gone and bind what is held now
+    if (!g_cap.done && now - g_cap.start > CAPTURE_SECONDS * 1000000000ull) g_cap.done = now;
     if (!g_cap.done) {
         int id = 0, got = input_capture(g_cap.reset, &id);
         g_cap.reset = false;
         if (got == INPUT_CAPTURE_KEY && !pad_cell) change(g_cap.action, g_cap.cell, id);
         if (got == INPUT_CAPTURE_PAD && pad_cell) change(g_cap.action, g_cap.cell, id);
         if (got != INPUT_CAPTURE_NONE && !(got == INPUT_CAPTURE_KEY && pad_cell)) g_cap.done = now;
-        if (now - g_cap.start > CAPTURE_SECONDS * 1000000000ull) g_cap.done = now;
     }
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     if (ImGui::BeginPopupModal("##bind_capture", nullptr,
@@ -221,6 +222,8 @@ static void capture_window(void) {
 }
 
 bool binds_modal(void) { return g_cap.action >= 0; }
+
+void binds_cancel(void) { g_cap.action = -1; }
 
 static bool g_reset_asked;   // the reset row was chosen this frame (acted on after the page)
 

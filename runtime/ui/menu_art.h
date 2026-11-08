@@ -3,11 +3,21 @@
 #include "imgui.h"
 
 typedef enum {
-    MENU_ART_CURSOR_GLOW,   // the glow of the game's button cursor (white mask; tinted by the caller)
-    MENU_ART_CURSOR_LINE,   // its outline
     MENU_ART_FRAME_DECO,    // a frame with ornamented corners
     MENU_ART_GUIDE_BAR,     // the control guide's bar
     MENU_ART_WINDOW_BASE,   // a rounded window base
+    // the layers of the save menu's Load and Cancel button, in drawing order; white masks except for the grain
+    MENU_ART_BTN_RIM,       // a soft line along the button's edge, reaching outside it
+    MENU_ART_BTN_FILL,      // the button's shape
+    MENU_ART_BTN_GRAIN,     // the mottling: light at the edge, dark and speckled in the middle
+    MENU_ART_BTN_EDGE,      // the light edge
+    MENU_ART_BTN_LINE,      // the inset line, a diamond and a curl at alternate corners
+    MENU_ART_CURSOR_GLOW,   // the options cursor's soft glow
+    MENU_ART_CURSOR_LINE,   // the options cursor's white frame (skin_art_prepare cuts it out of the texture)
+    MENU_ART_PANEL_FILL,    // a dark brown panel
+    MENU_ART_DIVIDER,       // the options menu's divider ornament
+    MENU_ART_DIVIDER_LINE,  // the line beside the ornament, ending in a dot
+    MENU_ART_TAB_SELECT,    // the plate of the selected category in the game's menu header
     MENU_ART_COUNT
 } MenuArt;
 

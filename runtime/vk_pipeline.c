@@ -2032,6 +2032,7 @@ static struct {
     uint32_t left;                     // prebuild jobs queued or running
     uint32_t built, failed, promoted;
     double t0;                         // now_ms() when the prebuild started
+    double until;                      // now_ms() after which the boot builders stop (comment at prewarm_run); 0 none
 } K = {.io = PLAT_MUTEX_INIT};
 
 static uint64_t rec_hash(const KeyRec *r) {
@@ -2637,11 +2638,12 @@ VkPipeline vk_pipeline_graphics_async(const VkPipeState *s, const VkPipeInfo **i
 
 static int id_cmp(const void *x, const void *y) { return memcmp(x, y, 32); }
 
-// Builds queued prebuild jobs until the low queue is empty, beside the pipe_worker pool (same bookkeeping).
+// Builds queued prebuild jobs until the low queue is empty or K.until passes, beside the pipe_worker pool (same
+// bookkeeping). Jobs left queued at K.until stay for the pool.
 static void warm_builder(void *arg) {
     (void)arg;
     plat_mutex_lock(&P.lock);
-    while (A.low) {
+    while (A.low && !(K.until && now_ms() >= K.until)) {
         Job *j = A.low;
         if ((A.low = j->next)) A.low->prev = NULL;
         else A.low_tail = NULL;
@@ -2685,6 +2687,16 @@ void vk_pipeline_prewarm_progress(VkPrewarmProgress *p) {
 }
 
 static void prewarm_run(void);
+
+// The boot's share of the pipeline prebuild with the graphics pipeline library. The boot builds the recorded
+// pipelines in record order, so those met first in play (the title screen, the first places) come first, for at most
+// this long after the shaders are ready; the rest stay queued for the pool workers, which build them below normal
+// priority while the game runs. A draw that meets one of them before it is built gets a pipeline linked from stage
+// libraries at once (gpl_link), as for any new pipeline in play. After a driver update, when every pipeline is built
+// from nothing, the boot thus waits this long instead of for all of them (15 minutes and more with a long play
+// history). Without the library a draw would have to wait for a whole build, so the boot waits for all; so it does
+// with NX2NAVI_PREWARM_FULL=1.
+#define PREWARM_PIPE_MS 20000.0
 
 void vk_pipeline_prewarm(void) {
     prewarm_run();
@@ -2777,6 +2789,8 @@ static void prewarm_run(void) {
     __atomic_store_n(&pw_pipe_done, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&pw_pipe_total, (int64_t)queued, __ATOMIC_RELAXED);
     __atomic_store_n(&pw_phase, 2, __ATOMIC_RELEASE);
+    const char *full = cfg_get("NX2NAVI_PREWARM_FULL");
+    K.until = P.gpl && !(full && !strcmp(full, "1")) ? now_ms() + PREWARM_PIPE_MS : 0;   // before the builders start
     PlatThread *t[64];
     int nt = 0;
     for (int i = 0; i < cpus && i < 64 && queued; i++)
@@ -2793,10 +2807,16 @@ static void prewarm_run(void) {
         }
     __atomic_store_n(&pw_pipe_done, (int64_t)queued, __ATOMIC_RELAXED);
     plat_mutex_lock(&P.lock);
-    while (K.left) plat_cond_wait(&done_cv, &P.lock);   // jobs a pool worker took
-    rt_log("vk_pipeline: prewarm: %zu records in %s: %u pipelines built, %u failed, %u already built, %u dropped "
-           "(shader neither cached nor stored); shaders %.0f ms, pipelines %.0f ms on %d threads, total %.0f ms",
-           n, K.path, K.built, K.failed, known, dropped, t1 - t0, now_ms() - t1, nt, now_ms() - t0);
+    uint32_t later = 0;
+    for (Job *j = A.low; j; j = j->next) later += j->prebuild;
+    if (!later)   // all built: wait for those a pool worker took
+        while (K.left) plat_cond_wait(&done_cv, &P.lock);
+    else          // the boot's time is up: the pool builds the rest while the game runs
+        plat_cond_broadcast(&work_cv);
+    rt_log("vk_pipeline: prewarm: %zu records in %s: %u pipelines built, %u left to build in the background, %u "
+           "failed, %u already built, %u dropped (shader neither cached nor stored); shaders %.0f ms, pipelines %.0f "
+           "ms on %d threads, total %.0f ms", n, K.path, K.built, later, K.failed, known, dropped, t1 - t0,
+           now_ms() - t1, nt, now_ms() - t0);
     free(K.file);
     K.file = NULL;
     plat_mutex_unlock(&P.lock);
@@ -2816,12 +2836,37 @@ static void prebuild_start(void) {
     plat_mutex_unlock(&P.lock);
 }
 
+// NX2NAVI_SPV_OVERRIDE=<dir> (test): a compute shader whose SPIR-V hashes (FNV-1a over its bytes, the name vk_dump.c
+// gives it) to a file <dir>/<hash>.spv runs that SPIR-V instead, an edited copy with the same interface, to see a
+// shader's intermediate values in a frame dump. NULL: no override (malloc'd words otherwise).
+static uint32_t *spv_override(const uint32_t *code, uint64_t words, uint64_t *out) {
+    const char *dir = cfg_get("NX2NAVI_SPV_OVERRIDE");
+    if (!dir || !*dir) return NULL;
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint64_t i = 0; i < words * 4; i++) h = (h ^ ((const uint8_t *)code)[i]) * 0x100000001b3ull;
+    char path[600];
+    snprintf(path, sizeof path, "%s/%016llx.spv", dir, (unsigned long long)h);
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint32_t *w = n > 20 && n % 4 == 0 ? malloc((size_t)n) : NULL;
+    if (w && fread(w, 1, (size_t)n, f) != (size_t)n) free(w), w = NULL;
+    fclose(f);
+    if (w) *out = (uint64_t)n / 4, rt_log("vk_pipeline: compute shader %016llx replaced by %s", (unsigned long long)h, path);
+    return w;
+}
+
 // A compute pipeline for cs in layout l; VK_NULL_HANDLE on failure. No lock needed (P.cache is driver-synchronised).
 static VkPipeline compute_create(const GfxShader *cs, const Layout *l) {
     uint64_t words;
     const uint32_t *code = gfx_shader_spirv(cs, &words);
+    uint64_t ow = 0;
+    uint32_t *over = spv_override(code, words, &ow);
+    if (over) code = over, words = ow;
     VkShaderModule m = make_module(code, words);
-    if (!m) return VK_NULL_HANDLE;
+    if (!m) return free(over), VK_NULL_HANDLE;
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rqc;
     VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
                                       .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -2839,6 +2884,7 @@ static VkPipeline compute_create(const GfxShader *cs, const Layout *l) {
     if (vkCreateComputePipelines(P.device, P.cache, 1, &ci, NULL, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
     plat_crash_context(NULL);
     vkDestroyShaderModule(P.device, m, NULL);
+    free(over);
     return pipe;
 }
 

@@ -137,11 +137,16 @@ static float volume(void) {
 
 static _Atomic uint64_t last_start_ns;
 
+// The least time between a cursor tick and the sound before it. Moving down a list or changing a value asks for a tick
+// at every step, about 20 a second while a direction is held, and the focus moving with a press or a tab change is part
+// of that sound: at most five ticks a second are heard.
+#define CURSOR_GAP_NS 180000000ull
+#define CURSOR_GAIN 0.6f   // the tick under the sounds of a decision
+
 void menu_sound_play(MenuSound id) {
     if ((unsigned)id >= MENU_SOUND_COUNT || volume() <= 0) return;
-    // A cursor tick right after another sound (the focus moving with a tab change or a press) is the same action.
     uint64_t now = plat_now_ns();
-    if (id == MENU_SOUND_CURSOR && now - atomic_load(&last_start_ns) < 40000000ull) return;
+    if (id == MENU_SOUND_CURSOR && now - atomic_load(&last_start_ns) < CURSOR_GAP_NS) return;
     atomic_store(&last_start_ns, now);
     if (atomic_load_explicit(&loaded, memory_order_acquire) != 2) load_all();
     if (atomic_load_explicit(&loaded, memory_order_acquire) != 2 || !sounds[id].pcm) return;
@@ -151,9 +156,11 @@ void menu_sound_play(MenuSound id) {
         if (atomic_load_explicit(&voices[i].pos, memory_order_acquire) < 0) { pick = i; break; }
         if (voices[i].started < oldest) oldest = voices[i].started, pick = i;
     }
-    // A sound that replaces itself (holding a direction) restarts instead of stacking up.
+    // A sound that replaces itself restarts instead of stacking up, and a decision replaces the tick of the same press
+    // (a row changes its value in the frame the press is seen).
     for (int i = 0; i < VOICES; i++)
-        if (atomic_load_explicit(&voices[i].pos, memory_order_acquire) >= 0 && atomic_load(&voices[i].sound) == (int)id &&
+        if (atomic_load_explicit(&voices[i].pos, memory_order_acquire) >= 0 &&
+            (atomic_load(&voices[i].sound) == (int)id || atomic_load(&voices[i].sound) == MENU_SOUND_CURSOR) &&
             atomic_load(&voices[i].pos) < 2400) {   // started under 50 ms ago
             pick = i;
             break;
@@ -170,13 +177,15 @@ void menu_sound_mix(float *out, uint32_t frames, int channels, int rate) {
     for (int v = 0; v < VOICES; v++) {
         int pos = atomic_load_explicit(&voices[v].pos, memory_order_acquire);
         if (pos < 0) continue;
-        const Sound *s = &sounds[atomic_load_explicit(&voices[v].sound, memory_order_relaxed)];
+        int which = atomic_load_explicit(&voices[v].sound, memory_order_relaxed);
+        const Sound *s = &sounds[which];
         if (g < 0) g = volume();
+        float vg = which == MENU_SOUND_CURSOR ? g * CURSOR_GAIN : g;
         uint32_t n = s->frames - (uint32_t)pos < frames ? s->frames - (uint32_t)pos : frames;
         const float *src = s->pcm + (size_t)pos * 2;
         for (uint32_t i = 0; i < n; i++) {
-            out[(size_t)i * channels] += src[2 * i] * g;
-            out[(size_t)i * channels + 1] += src[2 * i + 1] * g;
+            out[(size_t)i * channels] += src[2 * i] * vg;
+            out[(size_t)i * channels + 1] += src[2 * i + 1] * vg;
         }
         int next = pos + (int)n;
         // Only advance if the menu thread did not restart the voice meanwhile.

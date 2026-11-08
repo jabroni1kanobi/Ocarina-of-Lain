@@ -1,17 +1,37 @@
 """HTTPS for the launcher: JSON requests and file downloads that resume, report progress, can be cancelled and are
-checked against a sha256. Standard library only (urllib); Windows' own certificate store verifies the servers."""
+checked against a sha256. The standard library (urllib), and on Windows the truststore package of the launcher's
+Python for Windows' own certificate check.
+
+Two checks can accept a server's certificate, tried in turn by request():
+
+- Python's: OpenSSL with the certificates of Windows' ROOT and CA stores (ssl.create_default_context). It knows only
+  the certificates already in those stores, while Windows holds few roots and downloads the others the first time a
+  Windows program needs them. And it takes a stored certificate before the server's copy of the same name and key: a
+  store that still holds an old, expired cross-signature of the root a server's chain leads to makes it report
+  "certificate has expired" for a valid chain (repo.msys2.org's chain on a PC whose CA store still holds the
+  "ISRG Root X2" cross-signature that expired in September 2025).
+- Windows': Windows' own chain engine, which Windows programs check servers with (CertGetCertificateChain and
+  CertVerifyCertificateChainPolicy, through truststore.SSLContext). It weighs every path the stores and the server
+  allow, prefers a valid one, and downloads a missing root from Windows Update.
+
+A certificate both refuse ends the request with CertificateError: what each check said, whether the PC's clock agrees
+with the server's, and what to do."""
+import email.utils
 import hashlib
 import json
 import os
 import ssl
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from datetime import timezone
 from pathlib import Path
 
 from . import NAME
 
 CHUNK = 1 << 20
+CLOCK_TOLERANCE = 3600   # seconds between this PC's clock and a server's beyond which this PC's is wrong
 
 
 class Cancelled(Exception):
@@ -22,26 +42,127 @@ class DownloadError(Exception):
     pass
 
 
+class CertificateError(DownloadError):
+    """No certificate check accepts a server's certificate. Asking again gets the same answer, so download() does
+    not retry it."""
+
+
 def user_agent(version='dev'):
     return f'{NAME}-Launcher/{version}'
 
 
-_CTX = None
+def _under_wine():
+    try:
+        import ctypes
+        return hasattr(ctypes.WinDLL('ntdll'), 'wine_get_version')
+    except Exception:
+        return False
 
 
-def _context():
-    global _CTX
-    if _CTX is None:
-        _CTX = ssl.create_default_context()
-    return _CTX
+def _windows_check():
+    """An SSLContext that leaves the certificate to Windows' own verifier, or None off Windows, in a Python without
+    truststore (a checkout's own Python) and under Wine. Wine's crypt32 accepts a chain that stops at an issuer it
+    does not know (CERT_TRUST_IS_PARTIAL_CHAIN passes its SSL policy), and its roots are the host's, which Python's
+    check reads already."""
+    if os.name != 'nt' or _under_wine():
+        return None
+    try:
+        import truststore
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    except Exception:   # not installed, or crypt32 not reachable through ctypes
+        return None
+
+
+_CHECKS = None      # [(name, SSLContext)] in the order request() tries them
+_ACCEPTED = {}      # host -> index into _CHECKS of the check that accepted its certificate last
+
+
+def _checks():
+    global _CHECKS
+    if _CHECKS is None:
+        checks = [("Python's check", ssl.create_default_context())]
+        windows = _windows_check()
+        if windows is not None:
+            checks.append(("Windows' check", windows))
+        _CHECKS = checks
+    return _CHECKS
 
 
 def request(url, headers=None, timeout=30, version='dev'):
+    """The open response to a GET of url. An https URL is tried with each certificate check in turn, first the one
+    that accepted the host last, until one accepts the server; CertificateError when none does."""
     h = {'User-Agent': user_agent(version)}
     h.update(headers or {})
-    req = urllib.request.Request(url, headers=h)
-    ctx = _context() if url.startswith('https:') else None
-    return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+    if not url.startswith('https:'):
+        return urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout)
+    host = urllib.parse.urlsplit(url).hostname or ''
+    checks = _checks()
+    first = min(_ACCEPTED.get(host, 0), len(checks) - 1)
+    refused = []
+    for i in [first] + [i for i in range(len(checks)) if i != first]:
+        name, ctx = checks[i]
+        try:
+            r = urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout, context=ctx)
+        except urllib.error.URLError as e:
+            if not isinstance(e.reason, ssl.SSLCertVerificationError):
+                raise
+            refused.append((name, e.reason))
+            continue
+        _ACCEPTED[host] = i
+        return r
+    raise CertificateError(certificate_problem(url, refused, version)) from refused[0][1]
+
+
+def server_clock(url, timeout=10, version='dev'):
+    """The time (epoch seconds) of the Date header a plain-HTTP HEAD request to url answers with, without following a
+    redirect, or None without an answer. A PC whose clock is wrong cannot check any certificate, so its clock is
+    compared over HTTP; the answer is not authenticated and only chooses the advice of an error message."""
+    class Stay(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    req = urllib.request.Request(url, method='HEAD', headers={'User-Agent': user_agent(version)})
+    try:
+        with urllib.request.build_opener(Stay).open(req, timeout=timeout) as r:
+            date = r.headers.get('Date')
+    except urllib.error.HTTPError as e:   # the redirect to https, or any other status: its Date is as good
+        date = e.headers.get('Date')
+        e.close()
+    except Exception:   # no answer, whatever the reason (refused, timed out, not HTTP)
+        return None
+    if not date:
+        return None
+    try:
+        when = email.utils.parsedate_to_datetime(date)
+    except (TypeError, ValueError):
+        return None
+    return (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).timestamp()
+
+
+def _said(err):
+    said = getattr(err, 'verify_message', None) or (str(err.args[-1]) if err.args else type(err).__name__)
+    return said.strip().rstrip('.')
+
+
+def _local(t):
+    return time.strftime('%Y-%m-%d %H:%M', time.localtime(t))
+
+
+def certificate_problem(url, refused, version='dev'):
+    """The message of a CertificateError for url: what each check in refused ([(name, error)]) said, then the advice
+    that fits this PC's clock."""
+    host = urllib.parse.urlsplit(url).hostname or url
+    said = '; '.join(f'{name}: {_said(e)}' for name, e in refused)
+    text = f'{url}: the certificate of {host} was not accepted ({said}).'
+    where = 'Windows Settings > Time & language > Date & time' if os.name == 'nt' else "the system's settings"
+    ours, theirs = time.time(), server_clock(f'http://{host}/', version=version)
+    if theirs is not None and abs(ours - theirs) > CLOCK_TOLERANCE:
+        return (f"{text} This PC's clock reads {_local(ours)}, but {host} says it is {_local(theirs)}: set the date, "
+                f'time and time zone in {where}, then try again.')
+    clock = (f"This PC's clock agrees with {host}'s." if theirs is not None else
+             f"Check that this PC's date, time and time zone are right ({where}).")
+    return (f'{text} {clock} Security software that scans encrypted connections (HTTPS or SSL scanning) or a proxy '
+            'may be replacing the certificate: let NX2navi through it or turn that scanning off, then try again.')
 
 
 def get_bytes(url, headers=None, timeout=30, version='dev', limit=64 << 20):
@@ -100,7 +221,7 @@ def download(url, dest, sha256=None, size=None, progress=None, cancel=None, head
                         if progress:
                             progress(done, total or done)
             break
-        except Cancelled:
+        except (Cancelled, CertificateError):
             raise
         except urllib.error.HTTPError as e:
             if e.code == 416 and have:   # the part file is complete or longer than the file: start over

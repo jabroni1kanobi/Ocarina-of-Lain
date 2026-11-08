@@ -1,8 +1,8 @@
 """The window's pictures, drawn with numpy into RGBA arrays and handed to Tk as PNG data.
 
 Everything is drawn here from shapes and colours: the misty green backdrop, the wooden title band, the bronze label
-cells with their mottled texture, the description box, the white glowing cursor, the filigree divider, the Triforce
-and the small icons. Tk's canvas draws lines and polygons without antialiasing on Windows, so every curved or soft
+cells with their mottled texture, the description box, the white glowing cursor, the filigree divider, Navi and
+the small icons. Tk's canvas draws lines and polygons without antialiasing on Windows, so every curved or soft
 shape is a picture; flat rectangles and text stay canvas items.
 
 Colours follow the game's options menu (docs/launcher.md, "Look"). Sizes are in logical pixels times the display
@@ -29,7 +29,7 @@ PALETTE = {
     'muted': '#d4c6a6', 'dim': '#7d786a', 'off': '#5e5b51', 'on_text': '#fdf4de', 'salmon': '#e88f6c',
     'ok': '#a7d68c', 'gold': '#e6b65a', 'band_text': '#f3ecdc', 'status': '#b9a988', 'log_text': '#cfc4ab',
     'line': '#54442f', 'dot': '#5d4b36', 'filigree': '#7a6443', 'glow': '#e9ebee',
-    'tri_top': '#d49f36', 'tri_bottom': '#fcbf44',
+    'button_hover': '#8a6c3f', 'close_hover': '#b0402c',
 }
 
 
@@ -57,13 +57,30 @@ def photo(master, img):
     return tk.PhotoImage(master=master, data=base64.b64encode(png_bytes(img)).decode('ascii'), format='png')
 
 
+def dib_icon(img):
+    """One .ico entry as a 32-bit bitmap with its AND mask (what every Windows API and Tk read)."""
+    a = img if img.dtype == np.uint8 else (np.clip(img, 0, 1) * 255 + 0.5).astype(np.uint8)
+    n = a.shape[0]
+    bgra = a[::-1, :, [2, 1, 0, 3]].tobytes()   # bottom-up rows
+    stride = ((n + 31) // 32) * 4
+    mask = bytearray()
+    for row in a[::-1]:
+        bits = bytearray(stride)
+        for x in range(n):
+            if row[x, 3] < 128:
+                bits[x // 8] |= 0x80 >> (x % 8)
+        mask += bits
+    head = struct.pack('<IiiHHIIiiII', 40, n, 2 * n, 1, 32, 0, len(bgra) + len(mask), 0, 0, 0, 0)
+    return head + bgra + bytes(mask)
+
+
 def ico_bytes(images):
-    """A Windows .ico holding PNG-compressed images (one HxWx4 array per size, square)."""
-    pngs = [png_bytes(im) for im in images]
-    head = struct.pack('<HHH', 0, 1, len(pngs))
-    offset = 6 + 16 * len(pngs)
+    """A Windows .ico of square HxWx4 images: bitmaps up to 64 pixels, PNG above (as Windows' own icons do)."""
+    datas = [png_bytes(im) if im.shape[0] > 64 else dib_icon(im) for im in images]
+    head = struct.pack('<HHH', 0, 1, len(datas))
+    offset = 6 + 16 * len(datas)
     dirs, body = b'', b''
-    for im, data in zip(images, pngs):
+    for im, data in zip(images, datas):
         n = im.shape[0]
         dirs += struct.pack('<BBBBHHII', n % 256, n % 256, 0, 0, 1, 32, len(data), offset + len(body))
         body += data
@@ -450,35 +467,92 @@ def filigree(w, s):
     return img, h
 
 
-def triforce(w):
-    """The Triforce, w pixels wide: three triangles, each shading from top to bottom, on a transparent ground."""
-    h = int(round(w * 217 / 250))
-    k = w / 250.0
-    tris = [((125, 1), (186.2, 107), (63.8, 107)), ((62.2, 109), (123.4, 215), (1, 215)),
-            ((187.8, 109), (249, 215), (126.6, 215))]
-    img = new(h, w)
-    top, bottom = rgb(PALETTE['tri_top']), rgb(PALETTE['tri_bottom'])
-    for tri in tris:
-        pts = [(x * k, y * k) for x, y in tri]
-        mask = polygon_mask(h, w, pts)
-        y0, y1 = min(p[1] for p in pts), max(p[1] for p in pts)
-        t = np.clip((np.arange(h, dtype=np.float32) + 0.5 - y0) / max(y1 - y0, 1e-6), 0, 1)[:, None, None]
-        layer = new(h, w)
-        layer[..., :3] = top + (bottom - top) * t
-        layer[..., 3] = mask
-        over(img, layer)
+# Navi, the launcher's emblem and icon: 22 x 21 pixels as the artwork has them. W white (the outline and the
+# wings' highlights), g the wings' grey, K the black outline of the body, B and L its two blues, . transparent.
+NAVI = (
+    'WWWW..............WWWW',
+    'WggWW............WWggW',
+    'WgggWW..........WWgggW',
+    'WgWggWW........WWggWgW',
+    'WggWggW........WggWggW',
+    'WgWgWgWW......WWgWgWgW',
+    'WggggWgWKKKKKKWgWggggW',
+    'WWggWggKBBBBBBKggWggWW',
+    '.WggggKKBBLLBBKKggggW.',
+    '.WWggKKBBLLLLBBKKggWW.',
+    '..WWgKBBLLWWLLBBKgWW..',
+    '...WWKBBLWWWWLBBKWW...',
+    '.....KBBLLWWLLBBK.....',
+    '.....KBBBLLLLBBBK.....',
+    '.....WKKBBBBBBKKW.....',
+    '....WWgKKBBBBKKgWW....',
+    '...WWgggKKKKKKgggWW...',
+    '...WggWgW....WgWggW...',
+    '...WgWggW....WggWgW...',
+    '...WWggWW....WWggWW...',
+    '....WWWW......WWWW....',
+)
+NAVI_COLORS = {'W': (255, 255, 255), 'g': (207, 216, 220), 'K': (0, 0, 0), 'B': (2, 136, 209), 'L': (79, 195, 247)}
+
+
+def navi_pixels():
+    """The artwork as a 21 x 22 RGBA uint8 array."""
+    a = np.zeros((len(NAVI), len(NAVI[0]), 4), dtype=np.uint8)
+    for y, row in enumerate(NAVI):
+        for x, ch in enumerate(row):
+            if ch in NAVI_COLORS:
+                a[y, x, :3] = NAVI_COLORS[ch]
+                a[y, x, 3] = 255
+    return a
+
+
+def navi(k):
+    """Navi with every artwork pixel k x k screen pixels (crisp edges), as a float RGBA array."""
+    a = np.repeat(np.repeat(navi_pixels(), k, axis=0), k, axis=1)
+    return a.astype(np.float32) / 255.0
+
+
+def navi_icon(n):
+    """Navi on a transparent n x n square: whole-pixel scaling where the size allows it, an average of a large
+    rendering below 22 pixels."""
+    sq = np.zeros((n, n, 4), dtype=np.float32)
+    rows, cols = len(NAVI), len(NAVI[0])
+    if n >= cols:
+        img = navi(n // cols)
+    else:   # premultiplied box average of an 8x rendering, so the edges blend instead of dropping pixels
+        big = navi(8)
+        H, W = big.shape[:2]
+        h, w = max(1, round(rows * n / cols)), n
+        ys = (np.arange(h + 1) * H / h).astype(int)
+        xs = (np.arange(w + 1) * W / w).astype(int)
+        pm = big.copy()
+        pm[..., :3] *= pm[..., 3:4]
+        img = np.zeros((h, w, 4), dtype=np.float32)
+        for y in range(h):
+            for x in range(w):
+                img[y, x] = pm[ys[y]:ys[y + 1], xs[x]:xs[x + 1]].mean(axis=(0, 1))
+        img[..., :3] = np.where(img[..., 3:4] > 0, img[..., :3] / np.maximum(img[..., 3:4], 1e-6), 0)
+    h, w = img.shape[:2]
+    over(sq, img, (n - w) // 2, (n - h) // 2)
+    return sq
+
+
+def navi_ico():
+    """The launcher's icon (NX2navi.exe, the setup, the window, the taskbar) at the sizes Windows asks for."""
+    return ico_bytes([navi_icon(n) for n in (16, 20, 24, 32, 40, 48, 64, 96, 128, 256)])
+
+
+def title_glyph(kind, size, s):
+    """The minimise bar or the close cross of the band's buttons, in the band's light text colour."""
+    img = new(size, size)
+    t = max(1.2, 1.4 * s)
+    m = size * 0.12
+    if kind == 'min':
+        lines = [[(m, size / 2), (size - m, size / 2)]]
+    else:
+        lines = [[(m, m), (size - m, size - m)], [(size - m, m), (m, size - m)]]
+    paint(img, stroke_mask(size, size, lines, t), PALETTE['band_text'])
     return img
-
-
-def triforce_ico():
-    """The launcher's icon at the sizes Windows asks for."""
-    imgs = []
-    for n in (16, 24, 32, 48, 64, 128, 256):
-        t = triforce(n)
-        sq = new(n, n)
-        over(sq, t, 0, (n - t.shape[0]) // 2)
-        imgs.append(sq)
-    return ico_bytes(imgs)
 
 
 def check_mark(size, s, color=None):

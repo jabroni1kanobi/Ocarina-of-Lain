@@ -13,7 +13,10 @@ build's nx2navi.exe in the record layouts of runtime/gfx_shader.c ("answers met 
     seed-answers.bin   "NX2NSANS": stage, code hash, input id (zero: the runtime computes it), answers, priority
 
 Priority (the pad byte): 0 shaders the list's warm rows flag as title/menu (t), 1 other warm rows (S, C, R), 2 the
-rest; a default variant takes its shader's priority. Then it runs `nx2navi.exe --prepare-shaders`, which translates every record into the build's shader cache, writes
+rest; a default variant takes its shader's priority and sets DEFAULT_FLAG (bit 7). The runtime reads a flagged
+record's first translation and translates it again with better answers where it reads other ones
+(runtime/gfx_shader_guess.c): integer vertex inputs, and the texture and image types a compute shader's translation
+declares, for which a compute default variant goes without texture answers. Then it runs `nx2navi.exe --prepare-shaders`, which translates every record into the build's shader cache, writes
 shader-prepared.bin (one record per variant, in priority order) and builds every variant's stage library or compute
 pipeline once, so the GPU driver's own disk cache holds them (vk_pipeline.c "stage library prebuild"). The seed files
 can be deleted afterwards.
@@ -59,6 +62,18 @@ TYPES = {'float': 0, 'sint': 1, 'uint': 2}
 DEFAULT = {'tex': {str(slot): '2d' for slot in range(32)}}   # answers outside a shader's use mask are dropped
 CONTROL = 0x880
 ANS_REC = 4 + 32 + 32 + 147 + 1
+DEFAULT_FLAG = 0x80   # pad byte: a default variant, its answers refined from its first translation (gfx_shader_guess.c)
+# Default variants left out unless --all-shaders: the larger compute programs of two of Ocarina's three NDSR upscaler
+# packages. The translator turns their 20-47 KB of code into 3-12.6 MB of SPIR-V, which the GPU driver took 34 s to
+# 44 min each to build (RTX 5090, driver 621.01): 35 programs, the 24 that translate took 19,400 of the 21,750 s
+# every compute variant together took. Play sessions met none of them that was slow to build (one 20.8 KB program built in 0.2 s), while all five
+# agl_ndsr_vr_light.pck programs play met took 77-153 s each, so that package stays whole. A program play does meet
+# here is translated and built at its first use, as before the NDSR packages were read at all.
+SLOW_UNUSED = (('/agl_ndsr.pck', 16 << 10), ('/agl_ndsr_vr.pck', 16 << 10))   # (source suffix, code bytes above which)
+
+
+def slow_unused(s):
+    return any(s['source'].endswith(suffix) and len(s['code']) > limit for suffix, limit in SLOW_UNUSED)
 JOURNAL = 'shader-prepare-journal.bin'   # vk_pipeline.c skip_init: a 64-byte slot per worker, input id first
 RETRIES = 3
 
@@ -121,10 +136,12 @@ def answers(deps, stage, control):
         attr[int(loc)] = TYPES[t]
     for idx, t in deps.get('fout', {}).items():
         fout[int(idx)] = TYPES[t]
-    local = [0, 0, 0]   # vk_exec_draw.c answers_for: zero for graphics stages (they are in the input id)
-    if stage == 5:      # compute: the control section's local size (NVN2 at +0x58), 0 read as 1
+    local = [0, 0, 0]   # vk_exec_draw.c answers_for: zero for vertex and fragment programs (they are in the input id)
+    if stage not in (STAGES['vs'], STAGES['ps']):
+        # compute, task and mesh: the three words at the control section's local size (NVN2 at +0x58), 0 read as 1,
+        # each cut to 16 bits as answers_for stores them (task and mesh programs keep other fields there)
         local = struct.unpack_from('<III', control, 0x58 if nvn2(control) else 0x748)
-        local = [1, 1, 1] if not any(local) else [v or 1 for v in local]
+        local = [(v or 1) & 0xffff for v in local]
     packed = bytes(tex + img + fmt + attr + fout) + struct.pack('<HHHIB', *local, 0, 0)
     assert len(packed) == 147
     return packed
@@ -136,11 +153,18 @@ def nvn2(control):
 
 
 def bounds(control, code):
-    """(c1 offset, length) as runtime/gfx_shader.c req_init takes them."""
+    """(c1 offset, length) as runtime/gfx_shader.c req_init takes them.
+
+    NVN2: play hands req_init the code size of runtime/vk_exec_draw.c ctl_stage_len, which reaches the end of the c1
+    constants only when there are some (+0x40 below +0x44). With an empty c1 range past the code the length is the code
+    size alone; cutting at the range's end (as shader_census does) seeded most of Ocarina's vertex programs under keys
+    play never asks for."""
     if nvn2(control):
-        size, c1_start = struct.unpack_from('<I', control, 0x38)[0], struct.unpack_from('<I', control, 0x40)[0]
-        length = len(code)   # shader_census cut the code at the end of its c1 part
-        return (c1_start if size <= c1_start <= length else length), length
+        size, c1_start, c1_end = struct.unpack_from('<III', control, 0x38)[0], *struct.unpack_from('<II', control, 0x40)
+        code_size = c1_end if c1_start >= size and c1_end > c1_start and c1_end - size < 1 << 20 else size
+        if c1_start >= size and c1_end >= c1_start and c1_end <= min(code_size, len(code)):
+            return c1_start, c1_end
+        return min(size, len(code)), min(size, len(code))
     return struct.unpack_from('<II', control, 0x700)
 
 
@@ -166,6 +190,8 @@ def main():
     ap.add_argument('--list', help='a shader_list.tsv instead of tools/data/shader_list.tsv or refs/MacNativeGames')
     ap.add_argument('--no-run', action='store_true', help='write the seed files only')
     ap.add_argument('--no-list', action='store_true', help='default variants only, without a shared shader list')
+    ap.add_argument('--all-shaders', action='store_true',
+                    help='also the default variants SLOW_UNUSED leaves out (an hour more of GPU driver builds)')
     ap.add_argument('--exe', default='nx2navi.exe' if os.name == 'nt' else 'nx2navi',
                     help='the game executable in the build directory that runs --prepare-shaders')
     a = ap.parse_args()
@@ -183,7 +209,8 @@ def main():
         shaders, _ = inventory(a.romfs or extracted / 'romfs', a.exefs or extracted / 'exefs')
     t1 = time.monotonic()
     progs, recs, seen, skipped = {}, [], set(), {'not in this version': 0, 'stage': 0}
-    variants += [(key, DEFAULT) for key in sorted(shaders)]
+    left_out = 0 if a.all_shaders else sum(1 for s in shaders.values() if slow_unused(s))
+    variants += [(key, DEFAULT) for key in sorted(shaders) if a.all_shaders or not slow_unused(shaders[key])]
     for key, deps in variants:
         s = shaders.get(key)
         if not s:
@@ -200,11 +227,12 @@ def main():
             h = code_hash(stage, control, code, length, c1)
             progs[key] = (h, struct.pack('<III', stage, length, len(c1)) + h + control + code[:length] + c1)
         h = progs[key][0]
-        packed = answers(deps, stage, control)
+        default = deps is DEFAULT
+        packed = answers({} if default and stage == STAGES['cs'] else deps, stage, control)
         if (h, packed) in seen:   # a list row of the default bind state
             continue
         seen.add((h, packed))
-        rec = struct.pack('<I', stage) + h + bytes(32) + packed + bytes([prio.get(key, 2)])
+        rec = struct.pack('<I', stage) + h + bytes(32) + packed + bytes([prio.get(key, 2) | (DEFAULT_FLAG if default else 0)])
         assert len(rec) == ANS_REC
         recs.append((prio.get(key, 2), rec))
     recs.sort(key=lambda r: r[0])   # stable: list order within a priority
@@ -219,7 +247,8 @@ def main():
             f.write(rec)
     by = [sum(1 for p, _ in recs if p == i) for i in range(3)]
     print(f'{listed} listed variants and {len(shaders)} default ones: {len(recs)} of {len(progs)} shaders in {a.version} '
-          f'(priority t {by[0]}, warm {by[1]}, rest {by[2]}), skipped {skipped}; inventory {t1 - t0:.1f} s, '
+          f'(priority t {by[0]}, warm {by[1]}, rest {by[2]}), skipped {skipped}, {left_out} slow unused default variants '
+          f'left out (SLOW_UNUSED); inventory {t1 - t0:.1f} s, '
           f'seed written in {time.monotonic() - t0:.1f} s', flush=True)
     if a.no_run:
         return 0

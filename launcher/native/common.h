@@ -8,6 +8,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <propsys.h>
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
@@ -15,6 +16,12 @@
 #define PATHN 1024
 #define APP_NAME L"NX2navi"
 #define UNINSTALL_KEY L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NX2navi"
+/* The launcher window's taskbar identity (launcher/winsys.py app_id): a shortcut that carries it is the one the
+   taskbar groups and pins the window under, with the shortcut's icon. */
+#define APP_USER_MODEL_ID L"NX2navi.Launcher"
+static const PROPERTYKEY NX_PKEY_AppUserModel_ID = {
+    {0x9F4C2855, 0x9F79, 0x4B39, {0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3}}, 5};
+static const IID NX_IID_IPropertyStore = {0x886d8eeb, 0x8cf2, 0x4446, {0x8d, 0x02, 0xcd, 0xba, 0x1d, 0xbd, 0xcf, 0x99}};
 
 static inline void exe_dir(wchar_t *out, size_t n)
 {
@@ -105,6 +112,16 @@ static inline int make_shortcut(const wchar_t *lnk, const wchar_t *target, const
         IShellLinkW_SetWorkingDirectory(sl, workdir);
         IShellLinkW_SetIconLocation(sl, target, 0);
         IShellLinkW_SetDescription(sl, desc);
+        IPropertyStore *ps = NULL;
+        if (SUCCEEDED(IShellLinkW_QueryInterface(sl, &NX_IID_IPropertyStore, (void **)&ps))) {
+            PROPVARIANT pv;
+            memset(&pv, 0, sizeof pv);
+            pv.vt = VT_LPWSTR;
+            pv.pwszVal = (LPWSTR)APP_USER_MODEL_ID;
+            IPropertyStore_SetValue(ps, &NX_PKEY_AppUserModel_ID, &pv);
+            IPropertyStore_Commit(ps);
+            IPropertyStore_Release(ps);
+        }
         if (SUCCEEDED(IShellLinkW_QueryInterface(sl, &IID_IPersistFile, (void **)&pf))) {
             ok = SUCCEEDED(IPersistFile_Save(pf, lnk, TRUE));
             IPersistFile_Release(pf);

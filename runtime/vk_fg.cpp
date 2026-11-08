@@ -38,11 +38,13 @@ struct {
     ffxContext sc = nullptr;   // the swapchain context
     ffxContext fg = nullptr;   // the frame generation context
     VkExtent2D fg_ext = {0, 0};
+    VkExtent2D fg_max = {0, 0};   // the context's largest render size
     VkFormat fg_fmt = VK_FORMAT_UNDEFINED;
     ffxQueryDescSwapchainReplacementFunctionsVK fn = {};
     uint64_t frame = 0;
     int failed = 0;
     uint64_t generated = 0, paused = 0, no_inputs = 0, hudless = 0;
+    int on = 0;   // the last configured frame had generation on (vk_fg_generating)
 } F;
 
 VkResult submit_game(uint32_t n, const VkSubmitInfo *si, VkFence fence) {
@@ -92,6 +94,8 @@ extern "C" uint32_t vk_fg_queue_count(void) { return vk_fg_wanted() ? 3 : 1; }
 extern "C" void vk_fg_queues(VkQueue present, VkQueue acquire) { F.present = present, F.acquire = acquire; }
 
 extern "C" int vk_fg_active(void) { return F.sc != nullptr && !F.failed; }
+
+extern "C" int vk_fg_generating(void) { return vk_fg_active() && __atomic_load_n(&F.on, __ATOMIC_RELAXED); }
 
 extern "C" VkResult vk_fg_create_swapchain(const VkSwapchainCreateInfoKHR *ci, VkSwapchainKHR *sc) {
     if (F.sc) return F.fn.pOutCreateSwapchainFFXAPI(vk_ctx()->device, ci, nullptr, sc, F.sc);
@@ -162,6 +166,18 @@ extern "C" void vk_fg_frame(VkCommandBuffer cb, VkSwapchainKHR sc, VkFormat fmt,
     if (!vk_fg_active()) return;
     vk_dlaa_hudless_wanted = 1;   // the upscaling pass keeps a copy of the picture before the HUD (vk_dlaa.c hudless)
     const VkCtx *c = vk_ctx();
+    VkFfxImage depth, mv;
+    float jx = 0, jy = 0;
+    int reset = 0;
+    int have = vk_dlaa_fg_inputs(&depth, &mv, &jx, &jy, &reset);
+    // The context's largest render size covers the depth and motion vectors it is given. They have the scene's size,
+    // which DLAA and the widescreen pictures make larger than the window, and a context made for the window's size alone
+    // wrote past its own resources: a crash in amd_fidelityfx_vk.dll, device faults, striped frames. The scene is never
+    // larger than the picture (widescreen.c wide_picture), so the context is made for that once; remaking it while the
+    // swapchain still generated from the old one hung the present. A frame with a larger depth anyway is not generated.
+    unsigned pw, ph;
+    wide_picture(&pw, &ph);
+    VkExtent2D max_render = {ext.width > pw ? ext.width : pw, ext.height > ph ? ext.height : ph};
     if (F.fg && (F.fg_ext.width != ext.width || F.fg_ext.height != ext.height || F.fg_fmt != fmt)) {
         vk_queue_lock(), vkDeviceWaitIdle(c->device), vk_queue_unlock();   // a new window size: the context is made for its display size
         vk_ffx_destroy(&F.fg);
@@ -183,18 +199,23 @@ extern "C" void vk_fg_frame(VkCommandBuffer cb, VkSwapchainKHR sc, VkFormat fmt,
         d.header.pNext = &hl.header;
         d.flags = FFX_FRAMEGENERATION_ENABLE_DEPTH_INFINITE | (hdr_format(fmt) ? FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE : 0);
         d.displaySize = {ext.width, ext.height};
-        d.maxRenderSize = {ext.width, ext.height};
+        d.maxRenderSize = {max_render.width, max_render.height};
         d.backBufferFormat = ffxApiGetSurfaceFormatVK(fmt);
         ffxReturnCode_t r = vk_ffx_create(&F.fg, &d.header);
         if (r != FFX_API_RETURN_OK) return F.fg = nullptr, fail("the frame generation context", r);
-        F.fg_ext = ext, F.fg_fmt = fmt;
-        rt_log("fg: frame generation context for %ux%u%s", ext.width, ext.height, hdr_format(fmt) ? " (HDR)" : "");
+        F.fg_ext = ext, F.fg_fmt = fmt, F.fg_max = max_render;
+        rt_log("fg: frame generation context for %ux%u%s, render size up to %ux%u", ext.width, ext.height,
+               hdr_format(fmt) ? " (HDR)" : "", max_render.width, max_render.height);
     }
-    VkFfxImage depth, mv;
-    float jx = 0, jy = 0;
-    int reset = 0;
-    int have = vk_dlaa_fg_inputs(&depth, &mv, &jx, &jy, &reset);
+    if (have && (depth.width > F.fg_max.width || depth.height > F.fg_max.height)) {
+        static int told;
+        if (!told++)
+            rt_log("fg: a %ux%u scene is larger than the context's %ux%u: those frames are not generated", depth.width,
+                   depth.height, F.fg_max.width, F.fg_max.height);
+        have = 0;
+    }
     int on = have && !menu_is_open();
+    __atomic_store_n(&F.on, on, __ATOMIC_RELAXED);
     if (!have) F.no_inputs++;
     else if (!on) F.paused++;
     F.frame++;

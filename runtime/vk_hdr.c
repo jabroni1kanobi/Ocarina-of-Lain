@@ -114,7 +114,11 @@ static int name_is(const uint32_t *a, uint32_t len, const char *s) {   // OpName
 // reciprocal constants (0x7ef07ebb, 0x7ef19fff) and its one texture fp_t_tcb_8. Returns the clamps changed, -1 for
 // that shader with no output clamp found (a translator that stores the colour another way), 0 for any other shader.
 enum { SPV_OP_EXT_INST_IMPORT = 11, SPV_OP_EXT_INST = 12, SPV_OP_VARIABLE = 59, SPV_OP_STORE = 62,
-       SPV_OP_ACCESS_CHAIN = 65, SPV_SC_OUTPUT = 3, GLSL_FMAX = 40, GLSL_FCLAMP = 43 };
+       SPV_OP_ACCESS_CHAIN = 65, SPV_SC_OUTPUT = 3, GLSL_FMAX = 40, GLSL_FCLAMP = 43, GLSL_NMAX = 80,
+       GLSL_NCLAMP = 81 };
+// A 0..1 clamp: translators write FClamp, or NClamp (NaN gives the low bound, as the GPU's saturate does); its
+// replacement keeps the kind (NMax for NClamp).
+static int is_clamp(uint32_t inst) { return inst == GLSL_FCLAMP || inst == GLSL_NCLAMP; }
 
 static int fsr_unclamp(uint32_t *w, uint64_t *words) {
     uint64_t n = *words;
@@ -149,9 +153,10 @@ static int fsr_unclamp(uint32_t *w, uint64_t *words) {
     for (uint64_t i = 5; i < n;) {
         uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
         const uint32_t *a = w + i + 1;   // result type, result, set, instruction, x, min, max
-        if (op == SPV_OP_EXT_INST && len == 8 && a[2] == glsl && a[3] == GLSL_FCLAMP && a[1] < bound && out[a[1]] == 2 &&
+        if (op == SPV_OP_EXT_INST && len == 8 && a[2] == glsl && is_clamp(a[3]) && a[1] < bound && out[a[1]] == 2 &&
             a[5] == zero && a[6] == one) {
-            uint32_t ins[7] = {7u << 16 | SPV_OP_EXT_INST, a[0], a[1], a[2], GLSL_FMAX, a[4], zero};
+            uint32_t ins[7] = {7u << 16 | SPV_OP_EXT_INST, a[0], a[1], a[2], a[3] == GLSL_NCLAMP ? GLSL_NMAX : GLSL_FMAX,
+                               a[4], zero};
             memmove(w + k, ins, sizeof ins);
             k += 7, changed++;
         } else {
@@ -169,7 +174,10 @@ static int fsr_unclamp(uint32_t *w, uint64_t *words) {
 // anti-aliasing, DLSS and the HUD): the game's exposure, then per channel the fitted ACES filmic curve
 // x (2.51 x + 0.03) / (x (2.43 x + 0.59) + 0.14) and clamp(.., 0, 1), the value it stores. aces_extend changes each such
 // clamp in place, so the game's exposure and look stay its own:
-//   y = aces(x) up to the x where the curve reaches ACES_YP of the SDR white, its tangent above,
+//   y = aces(x) + d^2 / (1 + d), d = max(x - ACES_XP, 0): the game's curve up to ACES_XP (0.67 of the SDR white
+//   there), then a boost that starts flat (no crease in a gradient across ACES_XP) and grows to one picture white per
+//   unit of x, where the game's curve has flattened out near 1: bright light stays bright instead of all ending near
+//   white (x = 1.4, the sunlit leaves of a forest by day: 1.22 against the game's 0.86; x = 3: 2.6),
 //   a roll-off of y from half the peak to the peak (support +1440 .y: peak / picture white, at least 1),
 //   times the picture's white against the HUD's (+1440 .x).
 // The values are relative to the HUD's white, as the present's encode expects. The support buffer gets a member at
@@ -178,12 +186,10 @@ static int fsr_unclamp(uint32_t *w, uint64_t *words) {
 // Returns the clamps changed (0: not that shader).
 enum { SPV_OP_TYPE_INT = 21, SPV_OP_TYPE_BOOL = 20, SPV_OP_TYPE_VECTOR = 23, SPV_OP_TYPE_STRUCT = 30,
        SPV_OP_TYPE_POINTER = 32, SPV_OP_FUNCTION = 54, SPV_OP_LOAD = 61, SPV_OP_COMPOSITE_EXTRACT = 81,
-       SPV_OP_FNEGATE = 127, SPV_OP_FSUB = 131, SPV_OP_FMUL = 133, SPV_OP_FDIV = 136, SPV_OP_SELECT = 169,
-       SPV_OP_FORD_GREATER = 186, SPV_OP_MEMBER_DECORATE = 72, SPV_DEC_OFFSET = 35, SPV_SC_UNIFORM = 2, GLSL_EXP = 27,
-       GLSL_FMA = 50 };
-#define ACES_YP 0.8f
-
-static double aces(double x) { return x * (2.51 * x + 0.03) / (x * (2.43 * x + 0.59) + 0.14); }
+       SPV_OP_FNEGATE = 127, SPV_OP_FADD = 129, SPV_OP_FSUB = 131, SPV_OP_FMUL = 133, SPV_OP_FDIV = 136,
+       SPV_OP_SELECT = 169, SPV_OP_FORD_GREATER = 186, SPV_OP_MEMBER_DECORATE = 72, SPV_DEC_OFFSET = 35,
+       SPV_SC_UNIFORM = 2, GLSL_EXP = 27, GLSL_FMA = 50 };
+#define ACES_XP 0.6f
 
 static int aces_extend(uint32_t **spirv, uint64_t *words) {
     uint32_t *w = *spirv;
@@ -232,7 +238,7 @@ static int aces_extend(uint32_t **spirv, uint64_t *words) {
     if (glsl && ft && bt && it && v4 && c0 && c1 && c251 && c003 && st_len == 13 && last_offset == st)
         for (uint64_t i = 5; i < n && nsite < MAX_SITES; i += w[i] >> 16) {
             const uint32_t *a = w + i + 1;
-            if ((w[i] & 0xffff) != SPV_OP_EXT_INST || (w[i] >> 16) != 8 || a[2] != glsl || a[3] != GLSL_FCLAMP ||
+            if ((w[i] & 0xffff) != SPV_OP_EXT_INST || (w[i] >> 16) != 8 || a[2] != glsl || !is_clamp(a[3]) ||
                 a[5] != c0 || a[6] != c1 || a[4] >= bound || !def[a[4]])
                 continue;
             const uint32_t *m = w + def[a[4]];   // FMul(num, rcp)
@@ -246,16 +252,12 @@ static int aces_extend(uint32_t **spirv, uint64_t *words) {
         }
     free(def);
     if (!nsite) return 0;
-    // the curve's constants: where it reaches ACES_YP, its slope there, the tangent's offset
-    double lo = 0, hi = 64;
-    for (int k = 0; k < 60; k++) *(aces((lo + hi) / 2) < ACES_YP ? &lo : &hi) = (lo + hi) / 2;
-    double xp = (lo + hi) / 2, slope = (aces(xp + 1e-4) - aces(xp - 1e-4)) / 2e-4;
-    float fxp = (float)xp, fslope = (float)slope, foff = (float)(ACES_YP - slope * xp), fhalf = 0.5f;
+    float fxp = ACES_XP, fhalf = 0.5f;
     uint32_t id = bound;
     uint32_t new_ptr = ptr_v4 ? 0 : id++, ptr = ptr_v4 ? ptr_v4 : new_ptr;
-    uint32_t i11 = id++, kxp = id++, kslope = id++, koff = id++, khalf = id++;
-    // the struct's extra word, its member decoration, six global instructions, 22 instructions of at most 8 words a site
-    uint64_t cap = n + 1 + 5 + 6 * 5 + (uint64_t)nsite * 22 * 8;
+    uint32_t i11 = id++, kxp = id++, khalf = id++;
+    // the struct's extra word, its member decoration, four global instructions, 25 instructions of at most 8 words a site
+    uint64_t cap = n + 1 + 5 + 4 * 5 + (uint64_t)nsite * 25 * 8;
     uint32_t *o = malloc(cap * sizeof *o);
     if (!o) return 0;
     uint64_t k = 0;
@@ -269,13 +271,11 @@ static int aces_extend(uint32_t **spirv, uint64_t *words) {
         const uint32_t *a = w + i + 1;
         if (op == SPV_OP_FUNCTION && !globals_done) {   // new types and constants close the global section
             if (new_ptr) EMIT(SPV_OP_TYPE_POINTER, new_ptr, SPV_SC_UNIFORM, v4);
-            uint32_t b[4];
-            memcpy(&b[0], &fxp, 4), memcpy(&b[1], &fslope, 4), memcpy(&b[2], &foff, 4), memcpy(&b[3], &fhalf, 4);
+            uint32_t b[2];
+            memcpy(&b[0], &fxp, 4), memcpy(&b[1], &fhalf, 4);
             EMIT(SPV_OP_CONSTANT, it, i11, 11);
             EMIT(SPV_OP_CONSTANT, ft, kxp, b[0]);
-            EMIT(SPV_OP_CONSTANT, ft, kslope, b[1]);
-            EMIT(SPV_OP_CONSTANT, ft, koff, b[2]);
-            EMIT(SPV_OP_CONSTANT, ft, khalf, b[3]);
+            EMIT(SPV_OP_CONSTANT, ft, khalf, b[1]);
             globals_done = 1;
         }
         if (op == SPV_OP_TYPE_STRUCT && a[0] == st) {   // the support block gains a vec4 at 1440
@@ -289,17 +289,20 @@ static int aces_extend(uint32_t **spirv, uint64_t *words) {
             EMIT(SPV_OP_MEMBER_DECORATE, st, 11, SPV_DEC_OFFSET, 1440);
         } else if (s < nsite && i == site[s]) {
             uint32_t x = site_x[s], r = a[4], res = a[1];
-            uint32_t pv = id++, hv = id++, g = id++, p = id++, lin = id++, gt = id++, r0 = id++, y = id++, pm = id++,
-                     kn = id++, rng = id++, d = id++, q = id++, nq = id++, e = id++, om = id++, rl = id++, gk = id++,
-                     y2 = id++, gpos = id++, gs = id++;
+            uint32_t pv = id++, hv = id++, g = id++, p = id++, r0 = id++, dx = id++, d0 = id++, sq = id++, den = id++,
+                     bo = id++, y = id++, pm = id++, kn = id++, rng = id++, d = id++, q = id++, nq = id++, e = id++,
+                     om = id++, rl = id++, gk = id++, y2 = id++, gpos = id++, gs = id++;
             EMIT(SPV_OP_ACCESS_CHAIN, ptr, pv, sb, i11);
             EMIT(SPV_OP_LOAD, v4, hv, pv);
             EMIT(SPV_OP_COMPOSITE_EXTRACT, ft, g, hv, 0);
             EMIT(SPV_OP_COMPOSITE_EXTRACT, ft, p, hv, 1);
-            EMIT(SPV_OP_EXT_INST, ft, lin, glsl, GLSL_FMA, x, kslope, koff);   // the tangent
-            EMIT(SPV_OP_FORD_GREATER, bt, gt, x, kxp);
-            EMIT(SPV_OP_EXT_INST, ft, r0, glsl, GLSL_FMAX, r, c0);
-            EMIT(SPV_OP_SELECT, ft, y, gt, lin, r0);
+            EMIT(SPV_OP_EXT_INST, ft, r0, glsl, GLSL_NMAX, r, c0);                // NaN: 0, as the clamp gave
+            EMIT(SPV_OP_FSUB, ft, dx, x, kxp);                                   // the boost above ACES_XP
+            EMIT(SPV_OP_EXT_INST, ft, d0, glsl, GLSL_NMAX, dx, c0);
+            EMIT(SPV_OP_FMUL, ft, sq, d0, d0);
+            EMIT(SPV_OP_FADD, ft, den, d0, c1);
+            EMIT(SPV_OP_FDIV, ft, bo, sq, den);
+            EMIT(SPV_OP_FADD, ft, y, r0, bo);
             EMIT(SPV_OP_EXT_INST, ft, pm, glsl, GLSL_FMAX, p, c1);              // the peak, in picture whites
             EMIT(SPV_OP_FMUL, ft, kn, pm, khalf);                                // the knee: half of it
             EMIT(SPV_OP_FSUB, ft, rng, pm, kn);

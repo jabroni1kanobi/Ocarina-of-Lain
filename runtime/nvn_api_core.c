@@ -57,15 +57,6 @@ void nvn_guest_written(uint64_t addr, uint64_t size) {
 // arguments are undefined for memcpy anyway.
 static void ov_memcpy(Cpu *c) {
     uint64_t dst = arg_x(c, 0), src = arg_x(c, 1), n = arg_x(c, 2);
-    {
-        static int logged;
-        if (logged < 500) {
-            logged++;
-            fprintf(stderr, "[probe] memcpy dst=%#llx src=%#llx n=%#llx\n",
-                    (unsigned long long)dst, (unsigned long long)src, (unsigned long long)n);
-            fflush(stderr);
-        }
-    }
     if (n >= 1024) gfx_backend()->guest_read(src, n);
     memmove((void *)(uintptr_t)dst, (const void *)(uintptr_t)src, n);
     ret_x(c, dst);

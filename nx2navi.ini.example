@@ -15,6 +15,12 @@
 # at the cost of tearing. A monitor running with variable refresh (FreeSync, G-Sync) follows the frames instead, so
 # there any limit inside its range is even.
 # fps_limit = 60
+# Where RivaTuner Statistics Server is installed and running, the limit goes into its profile for the game's
+# executable and RTSS does the limiting instead of the game; closing the game puts back what the profile held.
+# Changing that profile needs the game run as administrator (RTSS keeps its profiles under Program Files); without
+# it, or with frame generation on, the game limits by itself, and also when RTSS's own frame counter shows the game
+# well past the limit (RTSS then hooks the game without holding it back). rtss = 0 always leaves it to the game.
+# rtss = 1
 # Older key, read only while fps_limit is unset: fps60 = 0 means a limit of 30.
 # fps60 = 1
 # Real-time frame step: game speed follows the clock instead of the frame count.
@@ -54,6 +60,9 @@
 # lib_prebuild_threads = 4
 # Build known pipelines ahead of time.
 # pipe_prebuild = 1
+# 1: the start waits until every known pipeline is built. Default 0: with the graphics pipeline library the start
+# builds them for at most 20 seconds and the rest in the background while you play.
+# prewarm_full = 0
 # Threads that translate known shaders at start (1 to 64; default: half the CPU threads, at most 16).
 # prewarm_xlate = 8
 # Vulkan graphics pipeline library, 0 or 1. Default: on.
@@ -120,7 +129,8 @@
 # set default to fullscreen = 1, window_size = 1280x800, output_res = 1280x800, render_scale = game, vk_present = fifo
 # and fps_limit = 40 (starting points, not measured yet). Read at start.
 # device_profile = auto
-# Presentation mode: mailbox (default when the driver offers it, vsync otherwise), fifo (vsync) or immediate.
+# Presentation mode: mailbox (default when the driver offers it, vsync otherwise), fifo (vsync) or immediate. The menu's
+# VSync switch sets mailbox when on and immediate when off.
 # vk_present = mailbox
 # Window client area in screen pixels (640x360 to 7680x4320), and borderless fullscreen. Windows display scaling does
 # not apply: at 150% scale, 1920x1080 covers the area 1280x720 covers at 100%. F11 switches fullscreen and saves it
@@ -239,11 +249,12 @@
 # local IPC of a running Discord client. 1 = on; the Menu tab of the settings menu (F1) switches it too, and the
 # change reaches the presence thread at once.
 # discord_rpc = 0
-# The application whose name and artwork the status shows. The default is the project's own application,
-# registered as "NX2navi" with the port's green ring icon as its art. Register your own at
-# discord.com/developers (name and art are yours to choose) and put its id here.
-# discord_app_id = 1567232599846293504
-# The key of the application's uploaded art asset shown as the status's large image.
+# The Discord application whose name ("Playing <name>") and artwork the status shows: its Application ID from
+# discord.com/developers/applications (General Information), digits only. Default: the NX2navi application, built
+# in from runtime/discord_app.h (NX2NAVI_DISCORD_APP_ID_DEFAULT). Register your own application to choose another
+# name and art.
+# discord_app_id = 1568862362969309275
+# The key of the application's uploaded art asset (Rich Presence > Art Assets) shown as the status's large image.
 # discord_image = nx2navi_512x512
 
 [audio]
@@ -266,11 +277,11 @@
 # rumble_strength = 130
 # rumble_curve = 0.6
 # rumble_triggers = 0
-# Which gamepad button is Switch A: nintendo (by position: east A, south B, west Y, north X), xbox (south A, east B,
-# west X, north Y, as an Xbox pad labels them; cross A on a PlayStation pad) or auto (nintendo for a pad with Nintendo
-# labels, xbox for the others). The bind_ lines below apply on top. Changes while the game runs take effect at once.
-# 0.1.9's xbox_prompts is read as nintendo with prompts = xbox.
-# pad_layout = auto
+# Which gamepad button is Switch A: nintendo (the default: the Switch's buttons by position on any pad, east A,
+# south B, west Y, north X), xbox (south A, east B, west X, north Y, as an Xbox pad labels them; cross A on a
+# PlayStation pad) or auto (nintendo for a pad with Nintendo labels, xbox for the others). The bind_ lines below apply
+# on top. Changes while the game runs take effect at once. 0.1.9's xbox_prompts is read as nintendo with prompts = xbox.
+# pad_layout = nintendo
 # The buttons the game's prompts show: nintendo (the game's own), xbox (LB RB LT RT, Menu, View and a d-pad cross,
 # and A B X Y as labelled on the button pad_layout presses: with nintendo, A shows as B and X as Y). Read at start
 # (docs/controls.md, "Xbox button prompts"). pc: the key or mouse button the keyboard defaults press each button with

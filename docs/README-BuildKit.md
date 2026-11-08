@@ -49,9 +49,9 @@ With extracted folders instead, use `--exefs "C:\path\exefs" --romfs "C:\path\ro
 check that your dump is the right version, add `--check` (it builds nothing).
 
 The build checks the version, unpacks the program files, packs the 26 GB RomFS image (every file is checked against
-the dump's own checksums), turns the game's code into C and compiles it (about 6 minutes on a 16-thread Ryzen 7; longer on fewer cores),
-then prepares every one of the game's shaders for your graphics card (about 5 more minutes), so the game does not stop
-to compile shaders while you play.
+the dump's own checksums) while it turns the game's code into C and compiles it (about 6 minutes on a 16-thread
+Ryzen 7; longer on fewer cores), then prepares every one of the game's shaders for your graphics card (about 5 more
+minutes), so the game does not stop to compile shaders while you play. The game it builds is for this PC's processor.
 You can use your PC meanwhile. If it stops,
 run the same command again: finished steps are skipped.
 
@@ -62,7 +62,9 @@ When it says `finished`, start `C:\Games\Ocarina\ocarina.exe`. You can delete `C
 
 - **F1** opens the settings menu. Settings are saved in `nx2navi.ini` beside the game; saves go to `profile\`.
 - Every shader was prepared during the build. After an update of your graphics driver, the next start shows
-  "Preparing shaders" once while the driver rebuilds them.
+  "Preparing shaders" once while the driver rebuilds them. With a driver that has Vulkan's graphics pipeline library
+  it lasts at most about 20 seconds once the shaders are translated, and the remaining pipelines are built in the
+  background while you play.
 - **Screen** in the menu has Upscaling (DLSS on NVIDIA RTX cards, FSR 3.1 on any card), Frame generation (FSR 3.1; it
   needs DLSS or FSR 3.1 upscaling on), HDR (Native is the game's own HDR; turn HDR on in Windows first) and the
   resolution. Those marked "after restart" take effect when the game starts again.

@@ -32,10 +32,12 @@ static int g_font_bad;
 #include "menu_sound.h"
 #include "menu_assets.h"
 #include "ui/menu_art.h"
+#include "ui/menu_skin.h"
 #pragma clang diagnostic pop
 #include "ui/amiibo_page.h"
 #include "ui/binds_page.h"
 #include "ui/option_rows.h"
+#include "ui/perf_panel.h"
 
 extern "C" {
 #include "amiibo.h"
@@ -58,8 +60,11 @@ void res_sizes(unsigned out[2], unsigned scene[2]);
 int res_adjustable(void);
 int wide_available(void);
 const char *const *vk_color_preset(const char *name);
+int vk_hdr_wanted(void);
+int vk_hdr_active(void);
 double frame_step_limit_hz(void);
 int frame_limit_adjustable(void);
+int rtss_limit_state(void);
 int frame_free_running(void);
 extern const int rt_game_version;
 extern const char rt_port_version[];
@@ -83,13 +88,20 @@ static std::atomic<int> g_reset;    // opened or closed since the last laid-out 
 // (F1, Esc), the polling thread (combo) and the present path (Continue, B) race.
 static PlatMutex open_lock = PLAT_MUTEX_INIT;
 
-// want 0 or 1 sets the state; -1 flips it. Returns the new state.
+static PlatMutex ev_lock = PLAT_MUTEX_INIT;   // the event queue below
+static int ev_n;
+
+// want 0 or 1 sets the state; -1 flips it. Returns the new state. The window events queued before the change go with it:
+// keys pressed just before a close would otherwise reach the menu when it next opens.
 static int change_open(int want) {
     plat_mutex_lock(&open_lock);
     int open = want < 0 ? !g_open.load() : want;
     if (g_open.load() != open) {
         g_open.store(open);
         g_reset.store(1);
+        plat_mutex_lock(&ev_lock);
+        ev_n = 0;
+        plat_mutex_unlock(&ev_lock);
         input_menu(open);
         menu_sound_play(open ? MENU_SOUND_OPEN : MENU_SOUND_CLOSE);
         rt_log("menu: %s", open ? "open" : "closed");
@@ -101,9 +113,9 @@ static int change_open(int want) {
 static void set_open(int open) { change_open(open); }
 
 static int g_failed_flag();
-// The boot screen is up (menu_boot_set): the menu does not open, as it would not be drawn while its keys queued up and
-// changed settings once the game ran.
-static std::atomic<int> g_booting{0};
+// Until the game's first frame (menu_overlay_frame), boot screen included: the menu does not open, as it would not be
+// drawn while its keys queued up and changed settings once the game ran.
+static std::atomic<int> g_booting{1};
 extern "C" int menu_is_open(void) { return g_open.load(std::memory_order_relaxed); }
 extern "C" void menu_toggle(void) {
     if (!g_failed_flag() && !g_booting.load(std::memory_order_acquire)) change_open(-1);
@@ -112,13 +124,17 @@ extern "C" void menu_toggle(void) {
 // ---- events from the window adapter, queued while the menu is open; the present path hands them to ImGui
 enum { EV_KEY, EV_POS, EV_BUTTON, EV_WHEEL, EV_FOCUS, EV_MAX = 256 };
 struct Ev { int type, a, b; float x, y; };
-static PlatMutex ev_lock = PLAT_MUTEX_INIT;
 static Ev ev_q[EV_MAX];
-static int ev_n;
 
 static void push(Ev e) {
     if (!menu_is_open()) return;
     plat_mutex_lock(&ev_lock);
+    // checked again under the lock: change_open empties the queue after the state changes, so an event of the closed
+    // menu cannot slip in behind that
+    if (!menu_is_open()) {
+        plat_mutex_unlock(&ev_lock);
+        return;
+    }
     if (e.type == EV_POS && ev_n && ev_q[ev_n - 1].type == EV_POS) ev_q[ev_n - 1] = e;   // only the newest position
     else if (ev_n < EV_MAX) ev_q[ev_n++] = e;
     plat_mutex_unlock(&ev_lock);
@@ -140,7 +156,12 @@ static void drain_events(ImGuiIO &io) {
     for (int i = 0; i < n; i++) {
         const Ev &e = q[i];
         switch (e.type) {
-        case EV_KEY: io.AddKeyEvent((ImGuiKey)e.a, e.b != 0); break;
+        case EV_KEY:
+            io.AddKeyEvent((ImGuiKey)e.a, e.b != 0);
+            // ImGui takes the modifier state (io.KeyShift, io.KeyCtrl: Shift+Tab, Ctrl+Up) from these keys only
+            if (e.a == ImGuiKey_LeftShift) io.AddKeyEvent(ImGuiMod_Shift, e.b != 0);
+            if (e.a == ImGuiKey_LeftCtrl) io.AddKeyEvent(ImGuiMod_Ctrl, e.b != 0);
+            break;
         case EV_POS: io.AddMousePosEvent(e.x, e.y); break;
         case EV_BUTTON: io.AddMouseButtonEvent(e.a, e.b != 0); break;
         case EV_WHEEL: io.AddMouseWheelEvent(e.x, e.y); break;
@@ -201,51 +222,17 @@ static ImGuiStyle g_base_style;   // the menu's style at 1080 lines
 static uint64_t g_last_ns;
 static uint64_t g_cost_ns, g_cost_frames;   // CPU time of layout and recording while open, logged per 600 frames
 
-// Sizes are tuned for 1080 lines and follow the window's height. Under 720 lines at 100% display scale they stay at the
-// 720 size; that floor grows with the window's DPI, so a small window on a 150% or 200% display (sizes are physical
-// pixels) still gets text as large as the display scale asks for.
-static float menu_scale(uint32_t h) {
-    float least = 720.0f * (float)gfx_window_dpi() / 96.0f;
-    return ((float)h >= least ? (float)h : least) / 1080.0f;
+// Sizes are tuned for 1080 lines and follow the window's height, or its width in a window narrower than 1.47:1, where
+// the menu's 1400 pixels at 1080 lines would no longer fit 88 % of the width (layout_menu). Under 720 lines at 100%
+// display scale they stay at the 720 size; that floor grows with the window's DPI, so a small window on a 150% or 200%
+// display (sizes are physical pixels) still gets text as large as the display scale asks for.
+static float menu_scale(uint32_t w, uint32_t h) {
+    float least = 720.0f * (float)gfx_window_dpi() / 96.0f, lines = fminf((float)h, (float)w * 0.68f);
+    return (lines >= least ? lines : least) / 1080.0f;
 }
 
-// The game's menu colours: a dark umber panel, warm browns for frames and what is selected, gold for the ornaments,
-// accents and the cursor, parchment text. kGreen and kOcarina keep their names for the selected and active controls.
-static const ImVec4 kGold(0.93f, 0.76f, 0.38f, 1), kGreen(0.36f, 0.26f, 0.13f, 1), kNavy(0.075f, 0.058f, 0.042f, 0.95f),
-    kOcarina(0.62f, 0.47f, 0.22f, 1);
-static void style_init(ImGuiStyle &s) {
-    ImGui::StyleColorsDark(&s);
-    s.WindowRounding = 10; s.FrameRounding = 6; s.GrabRounding = 6; s.TabRounding = 6; s.ChildRounding = 8;
-    s.WindowPadding = ImVec2(40, 30); s.FramePadding = ImVec2(14, 8); s.ItemSpacing = ImVec2(14, 12);
-    s.WindowBorderSize = 2; s.ScrollbarSize = 16;
-    ImVec4 *c = s.Colors;
-    c[ImGuiCol_WindowBg] = kNavy;
-    c[ImGuiCol_Border] = ImVec4(kGold.x, kGold.y, kGold.z, 0.55f);
-    c[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
-    c[ImGuiCol_PopupBg] = kNavy;
-    c[ImGuiCol_Text] = ImVec4(0.96f, 0.92f, 0.82f, 1);
-    c[ImGuiCol_TextDisabled] = ImVec4(0.62f, 0.56f, 0.46f, 1);
-    c[ImGuiCol_FrameBg] = ImVec4(0.15f, 0.115f, 0.08f, 1);
-    c[ImGuiCol_FrameBgHovered] = ImVec4(0.24f, 0.18f, 0.10f, 1);
-    c[ImGuiCol_FrameBgActive] = kGreen;
-    c[ImGuiCol_SliderGrab] = kOcarina;
-    c[ImGuiCol_SliderGrabActive] = kGold;
-    c[ImGuiCol_CheckMark] = kGold;
-    c[ImGuiCol_Button] = ImVec4(0.19f, 0.145f, 0.09f, 1);
-    c[ImGuiCol_ButtonHovered] = kGreen;
-    c[ImGuiCol_ButtonActive] = kOcarina;
-    c[ImGuiCol_Header] = ImVec4(0.24f, 0.18f, 0.10f, 1);
-    c[ImGuiCol_HeaderHovered] = kGreen;
-    c[ImGuiCol_HeaderActive] = kOcarina;
-    c[ImGuiCol_Tab] = ImVec4(0.13f, 0.10f, 0.07f, 1);
-    c[ImGuiCol_TabHovered] = kGreen;
-    c[ImGuiCol_TabSelected] = ImVec4(0.42f, 0.31f, 0.15f, 1);
-    c[ImGuiCol_TabSelectedOverline] = kGold;
-    c[ImGuiCol_NavCursor] = kGold;
-    c[ImGuiCol_Separator] = ImVec4(kGold.x, kGold.y, kGold.z, 0.30f);
-    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.36f, 0.28f, 0.16f, 1);
-    c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0.2f);
-}
+// The gold of the title and its Triforce (the rest of the menu's colours: ui/menu_skin.cpp skin_style).
+static const ImVec4 kGold(0.93f, 0.76f, 0.38f, 1);
 
 // The Triforce, its top at (x, y), h high, drawn with the title.
 static void triforce(ImDrawList *dl, float x, float y, float h, ImU32 col) {
@@ -263,7 +250,9 @@ static void make_context(void) {
     io.LogFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     io.BackendPlatformName = "nx2navi_menu";
-    style_init(g_base_style);
+    // no window switcher on Ctrl+Tab (the menu is one window; the switcher would list its inner windows by their ids)
+    GImGui->ConfigNavWindowingKeyNext = GImGui->ConfigNavWindowingKeyPrev = 0;
+    skin_style(g_base_style);
     ImGui::GetStyle() = g_base_style;
     g_ctx_ok = 1;
 }
@@ -395,11 +384,12 @@ static int fonts_up(float scale) {
         fa->AddFontFromMemoryTTF((void *)roboto_ttf, (int)sizeof roboto_ttf, 26.0f * scale, &fc, kRanges);
     }
     uint8_t *data[N] = {};
-    ImVector<ImWchar> ranges[N];
+    uint64_t sizes[N] = {};
+    ImVector<ImWchar> ranges[N], title_ranges[N];
     int merged = 0;
     for (int i = 0; i < N; i++) {
         char path[512];
-        uint64_t size = 0;
+        uint64_t &size = sizes[i];
         if (!plat_font_path(kCjk[i].lang, path, sizeof path) || !(data[i] = plat_file_read(path, &size))) continue;
         if (!font_usable(data[i], size)) {
             rt_log("menu: system font %s left out: the font parser cannot read it (%llu bytes)", path,
@@ -432,7 +422,23 @@ static int fonts_up(float scale) {
         rc.MergeMode = true;
         rc.FontDataOwnedByAtlas = false;
         fa->AddFontFromMemoryTTF((void *)roboto_ttf, (int)sizeof roboto_ttf, 30.0f * scale, &rc, kRanges);
+        // what the title face shows in the CJK languages: the menu's title and tabs (Simplified Chinese menu text) and
+        // the boot screen's title (the game's language)
+        static const UiTextId titles[] = {UI_MENU_TITLE, UI_MENU_TAB_SCREEN, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND,
+                                          UI_MENU_TAB_CONTROLS, UI_BOOT_TITLE};
+        for (int i = 0; i < N; i++) {
+            if (!data[i]) continue;
+            ImFontGlyphRangesBuilder b;
+            for (UiTextId id : titles) b.AddText(ui_text_in(kCjk[i].lang, id));
+            b.BuildRanges(&title_ranges[i]);
+            ImFontConfig mc;
+            mc.MergeMode = true;
+            mc.FontDataOwnedByAtlas = false;
+            fa->AddFontFromMemoryTTF(data[i], (int)sizes[i], 31.0f * scale, &mc, title_ranges[i].Data);
+        }
     }
+    skin_atlas_add(fa);    // the boxes' grain tile (ui/menu_skin.cpp), drawn into the atlas once it is built
+    skin_atlas_fill(fa);   // builds the atlas, which the upload below then takes as it is
     vk_queue_lock();   // the upload submits on the queue and waits for it
     int ok = ImGui_ImplVulkan_CreateFontsTexture();
     // ClarimoUDPE's line (ascent to descent, which is all Dear ImGui spaces lines by) leaves wrapped lines touching: the
@@ -445,6 +451,27 @@ static int fonts_up(float scale) {
     rt_log("menu: font atlas at %.1f px, language names from %d of %d system fonts", 26.0f * scale, merged, (int)N);
     g_font_scale = ok ? scale : 0;
     return ok;
+}
+
+// The atlas for scale. While the scale keeps changing (the window being resized), the atlas is made again only once it
+// has held for a quarter of a second, and the old one is drawn scaled meanwhile (io.FontGlobalScale): each atlas reads
+// the system fonts from disk and waits for the queue to upload. 0 when no atlas could be made.
+static float g_scale_seen;
+static uint64_t g_scale_seen_ns;
+
+static int fonts_for(float scale, uint64_t now) {
+    ImGuiIO &io = ImGui::GetIO();
+    if (g_font_scale == scale) {
+        io.FontGlobalScale = 1;
+        return 1;
+    }
+    if (scale != g_scale_seen) g_scale_seen = scale, g_scale_seen_ns = now;
+    if (g_font_scale > 0 && now - g_scale_seen_ns < 250000000ull) {
+        io.FontGlobalScale = scale / g_font_scale;
+        return 1;
+    }
+    io.FontGlobalScale = 1;
+    return fonts_up(scale);
 }
 
 extern "C" void menu_vk_release(void) {
@@ -683,6 +710,8 @@ static void row_game_lang(void) {
 }
 
 // The frame limit (frame_rate.c): unset, the older fps60 = 0 still means 30. The monitor choice shows the rate it gives.
+// The note says when RivaTuner Statistics Server does the limiting (rtss_limit.c), cannot change its profile, or let the
+// game run past its limit.
 static void row_fps_limit() {
     // 40 and 45: the Steam Deck's screen runs at 40 to 60 Hz (the OLED to 90); 40 divides 40 and 120 Hz evenly
     // 165 and 240: common gaming monitors; unlimited only where the game steps by the clock (frame_rate.c)
@@ -702,7 +731,12 @@ static void row_fps_limit() {
     }
     const char *set = cfg_get("NX2NAVI_FPS_LIMIT"), *old = cfg_get("NX2NAVI_FPS60");
     int cur = (!set || !*set) && old && !strcmp(old, "0") ? 0 : -1;
-    opt_choice_list("NX2NAVI_FPS_LIMIT", UI_MENU_FPS_LIMIT, vals, names, n, UI_MENU_FPS_LIMIT_DESC, cur);
+    int rtss = rtss_limit_state();
+    const char *note = rtss == 1   ? menu_text(UI_MENU_FPS_RTSS)
+                       : rtss == 2 ? menu_text(UI_MENU_FPS_RTSS_READONLY)
+                       : rtss == 3 ? menu_text(UI_MENU_FPS_RTSS_IGNORED)
+                                   : nullptr;
+    opt_choice_list("NX2NAVI_FPS_LIMIT", UI_MENU_FPS_LIMIT, vals, names, n, UI_MENU_FPS_LIMIT_DESC, cur, note);
 }
 
 // The menu's name of a NX2NAVI_VK_PRESENT mode (gfx_window_present_mode); NULL for another.
@@ -715,21 +749,37 @@ static const char *present_name(const char *mode) {
     return nullptr;
 }
 
-// "in use: VSync" under the Presentation value when the swapchain got another mode than the setting (a driver without
-// mailbox gets fifo); NULL when they agree or before the first swapchain.
-static const char *present_note(void) {
-    const char *got = gfx_window_present_mode(), *name = present_name(got);
-    if (!*got || !strcmp(got, cfg_value("NX2NAVI_VK_PRESENT")) || !name) return nullptr;
+// "in use: ..." under the VSync row when the swapchain does other than the row says: VSync when it is off and the driver
+// cannot present without waiting, Immediate when it is on and the driver has neither mailbox nor relaxed FIFO
+// (gfx_present.c pick_present_mode), so the game tears; NULL otherwise, and before the first swapchain.
+static const char *vsync_note(void) {
+    const char *got = gfx_window_present_mode();
+    if (!*got) return nullptr;
+    bool off = !strcmp(cfg_value("NX2NAVI_VK_PRESENT"), "immediate"), tears = !strcmp(got, "immediate");
+    if (off == tears) return nullptr;
     static char note[96];
-    snprintf(note, sizeof note, menu_text(UI_MENU_PRESENT_IN_USE), name);
+    snprintf(note, sizeof note, menu_text(UI_MENU_PRESENT_IN_USE),
+             menu_text(tears ? UI_MENU_PRESENT_IMMEDIATE : UI_MENU_PRESENT_VSYNC));
     return note;
 }
 
 // ---- the tabs
 
+// The PCI vendor of the GPU the game renders on (menu_overlay_frame reads it from the device it is given; 0 before the
+// first frame). DLSS runs on NVIDIA GPUs only, so the rows below leave it out elsewhere (AMD, Intel).
+static std::atomic<uint32_t> g_gpu_vendor;
+static VkPhysicalDevice g_gpu_vendor_of;
+static bool dlss_offered(void) {
+    uint32_t v = g_gpu_vendor.load(std::memory_order_relaxed);
+    return v == 0 || v == 0x10de;   // unknown (no frame yet): as before, offered
+}
+
 // One upscaling choice over three settings: NX2NAVI_UPSCALER (how the picture is fitted to the window), NX2NAVI_DLAA
-// (DLSS on) and NX2NAVI_DLSS (its mode, the render scale: widescreen.c wide_present). A DLSS mode fits the picture with
-// bilinear, DLSS having made it; the model is NVIDIA's own for the mode (vk_dlaa.c evaluate, dlss_preset at its default).
+// (DLSS or FSR 3.1 on) with NX2NAVI_TAA (which of them) and NX2NAVI_DLSS (the mode, the render scale: widescreen.c
+// wide_present). A temporal mode fits the picture with bilinear, the upscaler having made it; DLSS's model is NVIDIA's own
+// for the mode (vk_dlaa.c evaluate, dlss_preset at its default). The list: bilinear, FSR 1, the DLSS modes where DLSS
+// runs (dlss_offered), the FSR 3.1 modes; a DLSS mode still set where DLSS does not run stays listed last until another
+// choice replaces it, so the row shows what is set.
 static void row_upscaling(void) {
     static const char *const modes[] = {"dlaa", "quality", "balanced", "performance", "ultra_performance"};
     static const UiTextId mode_names[] = {UI_MENU_DLSS_DLAA, UI_MENU_DLSS_QUALITY, UI_MENU_DLSS_BALANCED,
@@ -737,28 +787,61 @@ static void row_upscaling(void) {
     // FSR 3.1's modes take the same render scales as DLSS's (Native AA is FSR's name for DLAA's full size)
     static const UiTextId fsr_names[] = {UI_MENU_FSR3_NATIVE, UI_MENU_DLSS_QUALITY, UI_MENU_DLSS_BALANCED,
                                          UI_MENU_DLSS_PERFORMANCE, UI_MENU_DLSS_ULTRA};
-    static char dl[10][96];
-    const char *names[12] = {menu_text(UI_MENU_UPSCALER_BILINEAR), menu_text(UI_MENU_UPSCALER_FSR)};
-    for (int i = 0; i < 5; i++) {
-        snprintf(dl[i], sizeof dl[i], i ? "DLSS %s" : "NVIDIA %s", menu_text(mode_names[i]));
-        snprintf(dl[5 + i], sizeof dl[5 + i], "AMD FSR 3.1 %s", menu_text(fsr_names[i]));
-        names[2 + i] = dl[i], names[7 + i] = dl[5 + i];
-    }
-    int cur = strcmp(cfg_value("NX2NAVI_UPSCALER"), "fsr") ? 0 : 1;
+    enum { BILINEAR, FSR1, DLSS, FSR3 };
+    struct Entry { int kind, mode; };
+    static char text[10][96];
+    Entry list[12];
+    const char *names[12];
+    int n = 0;
+    auto add = [&](int kind, int mode) {
+        list[n] = {kind, mode};
+        if (kind == BILINEAR) names[n] = menu_text(UI_MENU_UPSCALER_BILINEAR);
+        else if (kind == FSR1) names[n] = menu_text(UI_MENU_UPSCALER_FSR);
+        else {
+            char *t = text[(kind == FSR3 ? 5 : 0) + mode];
+            if (kind == DLSS) snprintf(t, sizeof text[0], mode ? "DLSS %s" : "NVIDIA %s", menu_text(mode_names[mode]));
+            else snprintf(t, sizeof text[0], "AMD FSR 3.1 %s", menu_text(fsr_names[mode]));
+            names[n] = t;
+        }
+        n++;
+    };
+    // what is set now
+    Entry now = {strcmp(cfg_value("NX2NAVI_UPSCALER"), "fsr") ? BILINEAR : FSR1, 0};
     if (cfg_bool("NX2NAVI_DLAA")) {
-        int base = strcmp(cfg_value("NX2NAVI_TAA"), "fsr3") ? 2 : 7;
-        cur = base;
+        now = {strcmp(cfg_value("NX2NAVI_TAA"), "fsr3") ? DLSS : FSR3, 0};
         for (int i = 0; i < 5; i++)
-            if (!strcmp(cfg_value("NX2NAVI_DLSS"), modes[i])) cur = base + i;
+            if (!strcmp(cfg_value("NX2NAVI_DLSS"), modes[i])) now.mode = i;
     }
-    int nv = opt_choice_index("NX2NAVI_UPSCALER", UI_MENU_UPSCALING, names, 12, cur, 1, UI_MENU_UPSCALING_DESC,
-                              cur >= 2 ? menu_text(UI_MENU_UPSCALING_DLSS_NOTE) : nullptr);
-    if (nv < 0) return;
-    opt_apply("NX2NAVI_UPSCALER", nv == 1 ? "fsr" : "bilinear");
-    opt_apply("NX2NAVI_DLAA", nv >= 2 ? "1" : "0");
-    if (nv < 2) opt_apply("NX2NAVI_FRAMEGEN", "off");   // it needs DLSS's or FSR 3.1's motion vectors (row_framegen)
-    if (nv >= 2) opt_apply("NX2NAVI_DLSS", modes[(nv - 2) % 5]);
-    if (nv >= 2) opt_apply("NX2NAVI_TAA", nv >= 7 ? "fsr3" : "dlss");
+    const bool dlss = dlss_offered();
+    add(BILINEAR, 0);
+    add(FSR1, 0);
+    for (int i = 0; dlss && i < 5; i++) add(DLSS, i);
+    for (int i = 0; i < 5; i++) add(FSR3, i);
+    if (!dlss && now.kind == DLSS) add(DLSS, now.mode);
+    int cur = 0;
+    for (int i = 0; i < n; i++)
+        if (list[i].kind == now.kind && list[i].mode == now.mode) cur = i;
+    bool temporal = now.kind >= DLSS;
+    int nv = opt_choice_index("NX2NAVI_UPSCALER", UI_MENU_UPSCALING, names, n, cur, 1,
+                              dlss ? UI_MENU_UPSCALING_DESC : UI_MENU_UPSCALING_DESC_FSR,
+                              temporal ? menu_text(dlss ? UI_MENU_UPSCALING_DLSS_NOTE : UI_MENU_UPSCALING_FSR_NOTE) : nullptr);
+    if (nv < 0 || nv >= n) return;
+    const Entry e = list[nv];
+    opt_apply("NX2NAVI_UPSCALER", e.kind == FSR1 ? "fsr" : "bilinear");
+    opt_apply("NX2NAVI_DLAA", e.kind >= DLSS ? "1" : "0");
+    if (e.kind < DLSS) opt_apply("NX2NAVI_FRAMEGEN", "off");   // it needs DLSS's or FSR 3.1's motion vectors (row_framegen)
+    if (e.kind >= DLSS) opt_apply("NX2NAVI_DLSS", modes[e.mode]);
+    if (e.kind >= DLSS) opt_apply("NX2NAVI_TAA", e.kind == FSR3 ? "fsr3" : "dlss");
+}
+
+// "in use: off" under the HDR value when the game started with HDR on but the swapchain is not HDR10 (the display or
+// Windows' HDR switch is off, vk_hdr_surface_format); else the restart note.
+static const char *hdr_note(void) {
+    const char *restart = menu_text(UI_MENU_HDR_NOTE);
+    if (!vk_hdr_wanted() || vk_hdr_active() || !*gfx_window_present_mode() || !cfg_bool("NX2NAVI_HDR")) return restart;
+    static char note[96];
+    snprintf(note, sizeof note, menu_text(UI_MENU_PRESENT_IN_USE), menu_text(UI_MENU_FRAMEGEN_OFF));
+    return note;
 }
 
 // HDR (vk_hdr.c), after a restart: off, the runtime's own (the game's tonemap kept above SDR white) or the game's native
@@ -766,7 +849,7 @@ static void row_upscaling(void) {
 static void row_hdr(void) {
     static const char *const values[] = {"0", "1", "native"};
     const char *names[] = {menu_text(UI_MENU_FRAMEGEN_OFF), menu_text(UI_MENU_HDR_ENHANCED), menu_text(UI_MENU_HDR_NATIVE)};
-    opt_choice_list("NX2NAVI_HDR", UI_MENU_HDR, values, names, 3, UI_MENU_HDR_DESC, -1, menu_text(UI_MENU_HDR_NOTE));
+    opt_choice_list("NX2NAVI_HDR", UI_MENU_HDR, values, names, 3, UI_MENU_HDR_DESC, -1, hdr_note());
     if (!cfg_bool("NX2NAVI_HDR")) return;
     opt_slider("NX2NAVI_HDR_PEAK_NITS", UI_MENU_HDR_PEAK, 400, 10000, UI_MENU_HDR_PEAK_DESC, 50, "%.0f nits");
     opt_slider("NX2NAVI_HDR_GAME_NITS", UI_MENU_HDR_GAME, 80, 500, UI_MENU_HDR_GAME_DESC, 5, "%.0f nits");
@@ -778,7 +861,8 @@ static void row_hdr(void) {
 // Frame generation (vk_fg.cpp), after a restart; it needs a temporal upscaler's motion vectors
 static void row_framegen(void) {
     // the generated frames are made from DLSS's or FSR 3.1's motion vectors: without one of them it would do nothing
-    if (!cfg_bool("NX2NAVI_DLAA")) opt_disable_next(UI_MENU_FRAMEGEN_NEEDS);
+    const bool dlss = dlss_offered();
+    if (!cfg_bool("NX2NAVI_DLAA")) opt_disable_next(dlss ? UI_MENU_FRAMEGEN_NEEDS : UI_MENU_FRAMEGEN_NEEDS_FSR);
     static const char *const values[] = {"off", "fsr3", "dlss"};
     const char *names[] = {menu_text(UI_MENU_FRAMEGEN_OFF), "AMD FSR 3.1", "NVIDIA DLSS"};
     const char *v = cfg_value("NX2NAVI_FRAMEGEN");
@@ -786,9 +870,10 @@ static void row_framegen(void) {
     // NVIDIA DLSS (vk_dlssg.c) is listed only while it is set: Streamline now starts and takes the swapchain, but presents
     // no generated frames yet (one presented per frame, status OK)
     int n = cur == 2 ? 3 : 2;
-    int nv = opt_choice_index("NX2NAVI_FRAMEGEN", UI_MENU_FRAMEGEN, names, n, cur, 0, UI_MENU_FRAMEGEN_DESC,
-                              menu_text(UI_MENU_FRAMEGEN_NOTE));
-    if (nv >= 0) opt_apply("NX2NAVI_FRAMEGEN", values[nv]);
+    int nv = opt_choice_index("NX2NAVI_FRAMEGEN", UI_MENU_FRAMEGEN, names, n, cur, 0,
+                              dlss ? UI_MENU_FRAMEGEN_DESC : UI_MENU_FRAMEGEN_DESC_FSR,
+                              menu_text(dlss ? UI_MENU_FRAMEGEN_NOTE : UI_MENU_FRAMEGEN_NOTE_FSR));
+    if (nv >= 0 && nv < n) opt_apply("NX2NAVI_FRAMEGEN", values[nv]);
 }
 
 // The picture's height (widescreen.c picture_height): the game's 1440 or more.
@@ -802,8 +887,9 @@ static void tab_screen(float scale) {
     opt_begin("##screen", scale);
     opt_toggle("NX2NAVI_FULLSCREEN", UI_MENU_FULLSCREEN, UI_MENU_FULLSCREEN_DESC);
     row_window_size();
-    static const UiTextId present[] = {UI_MENU_PRESENT_MAILBOX, UI_MENU_PRESENT_VSYNC, UI_MENU_PRESENT_IMMEDIATE};
-    opt_choice("NX2NAVI_VK_PRESENT", UI_MENU_PRESENT, present, 3, UI_MENU_PRESENT_DESC, present_note());
+    // On is the default mode, mailbox with its fallbacks (gfx_present.c pick_present_mode): plain fifo would drop the
+    // game to 30 at every slow frame on a 60 Hz display. A fifo already saved also reads as on.
+    opt_toggle_value("NX2NAVI_VK_PRESENT", UI_MENU_PRESENT_VSYNC, UI_MENU_PRESENT_DESC, "mailbox", "immediate", vsync_note());
     row_gpu();
     static const UiTextId perf[] = {UI_MENU_PERF_OFF, UI_MENU_PERF_FPS, UI_MENU_PERF_FULL};
     opt_choice("NX2NAVI_PERF_OVERLAY", UI_MENU_PERF_OVERLAY, perf, 3, UI_MENU_PERF_OVERLAY_DESC);
@@ -824,8 +910,6 @@ static void tab_screen(float scale) {
     int dl = cfg_bool("NX2NAVI_DLAA"), fsr3 = dl && !strcmp(cfg_value("NX2NAVI_TAA"), "fsr3");
     if (!fsr3 && (strcmp(cfg_value("NX2NAVI_UPSCALER"), "fsr") || dl)) opt_disable_next(UI_MENU_SHARPNESS_NEEDS_FSR);
     opt_slider("NX2NAVI_SHARPNESS", UI_MENU_SHARPNESS, 0, 100, UI_MENU_SHARPNESS_DESC, 5, "%.0f %%");
-    static const UiTextId aspect[] = {UI_MENU_ASPECT_FIT, UI_MENU_ASPECT_STRETCH};
-    opt_choice("NX2NAVI_ASPECT", UI_MENU_ASPECT, aspect, 2, UI_MENU_ASPECT_DESC);
     opt_end();
 }
 
@@ -920,34 +1004,46 @@ static const char *prompts_note(bool *restart) {
     }
 }
 
-// The confirmation of "Restart now", over the menu; Cancel has the cursor first. Restart writes nx2navi.ini, then closes
-// the game as Quit does and starts it again (gfx_window_request_restart). It waits while the game writes a save, and
-// the game stays when nx2navi.ini cannot be written, as the new prompts would not come back. From the Cheats tab
-// (restart_rebuild) Restart also lets the next start rebuild for cheats whose last rebuild failed (cheats_rebuild_allow).
-static bool restart_rebuild;
-static void restart_confirm(void) {
+// The confirmation of the menu's Restart button, over the menu; Cancel has the cursor first. Restart writes nx2navi.ini,
+// then closes the game as Quit does and starts it again (gfx_window_request_restart). It waits while the game writes a
+// save, and the game stays when nx2navi.ini cannot be written, as the changed settings would not come back. From the
+// Cheats tab (restart_rebuild) Restart also lets the next start rebuild for cheats whose last rebuild failed
+// (cheats_rebuild_allow). The Quit button's confirmation is the same box (g_confirm_quit), and it waits too: the game
+// runs on while the menu is open, and closing the window finishes only a Commit that has begun (gfx_window_closed,
+// fs_save_flush), so a save between writing its files and committing them would be dropped.
+static bool restart_rebuild, g_confirm_quit;
+static void restart_confirm(float scale) {
     g_modal = false;
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    if (!ImGui::BeginPopupModal("##restart_confirm", nullptr,
-                                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize))
-        return;
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0);
+    const bool open = ImGui::BeginPopupModal("##confirm", nullptr,
+                                             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::PopStyleVar();
+    if (!open) return;
     g_modal = true;
-    ImGui::TextUnformatted(menu_text(UI_MENU_RESTART_CONFIRM));
+    const ImVec2 box = ImGui::GetWindowPos(), box_size = ImGui::GetWindowSize();
+    skin_panel(ImGui::GetWindowDrawList(), box, ImVec2(box.x + box_size.x, box.y + box_size.y), scale);
+    ImGui::TextUnformatted(menu_text(g_confirm_quit ? UI_MENU_QUIT_CONFIRM : UI_MENU_RESTART_CONFIRM));
     bool saving = fs_save_busy() != 0;
-    if (saving || !cfg_last_save_ok())
+    if (saving || (!g_confirm_quit && !cfg_last_save_ok()))
         ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1), "%s",
-                           menu_text(saving ? UI_MENU_RESTART_SAVING : UI_MENU_SAVE_FAILED));
+                           menu_text(!saving ? UI_MENU_SAVE_FAILED : g_confirm_quit ? UI_MENU_QUIT_SAVING
+                                                                                    : UI_MENU_RESTART_SAVING));
     ImGui::Spacing();
-    const char *yes = menu_text(UI_MENU_RESTART_YES), *no = menu_text(UI_MENU_RESET_NO);
+    const char *yes = menu_text(g_confirm_quit ? UI_MENU_QUIT : UI_MENU_RESTART_YES), *no = menu_text(UI_MENU_RESET_NO);
     const ImGuiStyle &st = ImGui::GetStyle();
     float bw = fmaxf(ImGui::CalcTextSize(yes).x, ImGui::CalcTextSize(no).x) + st.FramePadding.x * 4;
-    bool close = ImGui::Button(no, ImVec2(bw, 0));
+    bool close = skin_widget_button(no, ImVec2(bw, 0), scale);
     if (ImGui::IsWindowAppearing()) ImGui::SetItemDefaultFocus();
-    ImGui::SameLine();
+    ImGui::SameLine(0, st.ItemSpacing.x + skin_cursor_reach(scale));
     ImGui::BeginDisabled(saving);
-    if (ImGui::Button(yes, ImVec2(bw, 0)) && cfg_save()) {
-        if (restart_rebuild) cheats_rebuild_allow();
-        gfx_window_request_restart();
+    if (skin_widget_button(yes, ImVec2(bw, 0), scale)) {
+        if (g_confirm_quit) {
+            gfx_window_request_close();
+        } else if (cfg_save()) {
+            if (restart_rebuild) cheats_rebuild_allow();
+            gfx_window_request_restart();
+        }
     }
     ImGui::EndDisabled();
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false))
@@ -955,7 +1051,6 @@ static void restart_confirm(void) {
     if (close) {
         ImGui::CloseCurrentPopup();
         restart_rebuild = false;
-        opt_focus_key("##restart");   // back on the row it came from
     }
     ImGui::EndPopup();
 }
@@ -996,18 +1091,26 @@ static void go_to(int tab, const char *key) {
 }
 
 // The game's interface sounds (menu_sound.c) for what the frame did: a press or click on an item, the cursor on another
-// item, another tab by a click (L and R play theirs where they are read). The first frame after opening only records.
+// item, another tab by a click (L, R, Q and E play theirs where they are read: g_tab_sounded). The first frame after
+// opening only records: the open sound has played, and the cursor going to the first row is part of it. g_sound_fresh
+// marks that frame, as the frame count alone does not when nothing was laid out while the menu was closed.
+static bool g_sound_fresh;
+static int g_tab_sounded = -1;   // the tab L / R / Q / E asked for, its sound played
+
 static void menu_sounds_frame(void) {
     ImGuiContext &g = *GImGui;
     static int last_frame = -2, last_tab = -1;
     static ImGuiID last_nav;
-    bool fresh = g.FrameCount != last_frame + 1;
+    bool fresh = g_sound_fresh || g.FrameCount != last_frame + 1;
+    g_sound_fresh = false;
     last_frame = g.FrameCount;
     if (!fresh) {
         if (g.ActiveId && g.ActiveIdIsJustActivated) menu_sound_play(MENU_SOUND_DECIDE);
         else if (g.NavId && g.NavId != last_nav) menu_sound_play(MENU_SOUND_CURSOR);
-        if (g_tab != last_tab && last_tab >= 0) menu_sound_play(g_tab > last_tab ? MENU_SOUND_TAB_RIGHT : MENU_SOUND_TAB_LEFT);
+        if (g_tab != last_tab && last_tab >= 0 && g_tab != g_tab_sounded)
+            menu_sound_play(g_tab > last_tab ? MENU_SOUND_TAB_RIGHT : MENU_SOUND_TAB_LEFT);
     }
+    if (g_tab != last_tab) g_tab_sounded = -1;
     last_nav = g.NavId, last_tab = g_tab;
 }
 
@@ -1023,7 +1126,6 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
                                         ImGuiWindowFlags_NoSavedSettings);
     if (framed) ImGui::PopStyleVar();
     const ImVec2 win_p = ImGui::GetWindowPos(), win_s = ImGui::GetWindowSize();
-    const float inset = 7 * scale;
     // The game's ornamented frame (ui/menu_art.cpp; nothing without the RomFS's), in gold. Its lines lie inside the
     // texture (about 4 % of the width, 7 % of the height in), so the frame is drawn that far outside the window and its
     // lines run along the window's edge, clear of the title and the rows; unclipped, it may reach past the window.
@@ -1050,19 +1152,24 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
         ImGui::SameLine();
         ImGui::TextUnformatted(menu_text(UI_MENU_TITLE));
     }
+    const float title_end = ImGui::GetItemRectMax().x;
     if (g_title_font) ImGui::PopFont();
-    // the port version and the game update, right-aligned on the title line: what a bug report needs first
+    // the port version and the game update, right-aligned on the title line: what a bug report needs first; left out
+    // where it would run into the title (a narrow window, a long title)
     char game[16], version[96];
     snprintf(game, sizeof game, "%d.%d.%d", rt_game_version / 100, rt_game_version / 10 % 10, rt_game_version % 10);
     snprintf(version, sizeof version, "NX2navi %s  -  game %s", rt_port_version, game);
-    ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - ImGui::CalcTextSize(version).x);
-    ImGui::TextDisabled("%s", version);
+    float version_x = win_s.x - ImGui::GetStyle().WindowPadding.x - ImGui::CalcTextSize(version).x;
+    if (win_p.x + version_x >= title_end + ImGui::GetStyle().ItemSpacing.x * 2) {
+        ImGui::SameLine(version_x);
+        ImGui::TextDisabled("%s", version);
+    }
 
     int step = g_modal || binds_modal()                                                                  ? 0
              : ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
              : ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false) ? -1
                                                                                                          : 0;
-    if (step) g_tab_request = (g_tab + step + TAB_COUNT) % TAB_COUNT;
+    if (step) g_tab_request = g_tab_sounded = (g_tab + step + TAB_COUNT) % TAB_COUNT;
     if (step) menu_sound_play(step > 0 ? MENU_SOUND_TAB_RIGHT : MENU_SOUND_TAB_LEFT);
     if (g_tab_request >= 0) g_focus_page = g_tab_request;   // the new page's first row takes the cursor
 
@@ -1072,9 +1179,8 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
         for (int k = 0; k < TAB_COUNT; k++) {
             char label[128];
             snprintf(label, sizeof label, "  %s  ###tab%d", menu_text(kTabNames[k]), k);   // the id stays per language
-            if (g_title_font) ImGui::PushFont(g_title_font);   // the tab labels in the title face
-            bool shown = ImGui::BeginTabItem(label, nullptr, g_tab_request == k ? ImGuiTabItemFlags_SetSelected : 0);
-            if (g_title_font) ImGui::PopFont();
+            // the tab labels in the title face, on the rows' button (ui/menu_skin.cpp)
+            bool shown = skin_tab_item(label, menu_text(kTabNames[k]), g_tab_request == k ? ImGuiTabItemFlags_SetSelected : 0, scale, g_title_font);
             if (!shown) continue;
             g_tab = k;
             if (g_focus_page == k) {
@@ -1111,15 +1217,20 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
         ImGui::SetCursorPosY(y + st.FramePadding.y);
         ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1), "%s", menu_text(UI_MENU_SAVE_FAILED));
     }
-    const char *cont = menu_text(UI_MENU_CONTINUE), *quit = menu_text(UI_MENU_QUIT);
-    float bw = fmaxf(ImGui::CalcTextSize(cont).x, ImGui::CalcTextSize(quit).x) + st.FramePadding.x * 4;
-    ImGui::SetCursorPos(ImVec2(ImGui::GetWindowWidth() - st.WindowPadding.x - bw * 2 - st.ItemSpacing.x, y));
-    if (ImGui::Button(cont, ImVec2(bw, 0))) set_open(0);
-    ImGui::SameLine();
-    if (ImGui::Button(quit, ImVec2(bw, 0))) gfx_window_request_close();
+    const char *cont = menu_text(UI_MENU_CONTINUE), *restart = menu_text(UI_MENU_RESTART_YES), *quit = menu_text(UI_MENU_QUIT);
+    float bw = fmaxf(fmaxf(ImGui::CalcTextSize(cont).x, ImGui::CalcTextSize(restart).x), ImGui::CalcTextSize(quit).x) + st.FramePadding.x * 4;
+    // the save menu's brown buttons, with the game's cursor on the selected one (ui/menu_skin.cpp)
+    float gap = st.ItemSpacing.x + skin_cursor_reach(scale);
+    // right-aligned; in a window too narrow for all three, from the left edge
+    ImGui::SetCursorPos(ImVec2(fmaxf(st.WindowPadding.x, ImGui::GetWindowWidth() - st.WindowPadding.x - bw * 3 - gap * 2), y));
+    if (skin_widget_button(cont, ImVec2(bw, 0), scale)) set_open(0);
+    ImGui::SameLine(0, gap);
+    if (skin_widget_button(restart, ImVec2(bw, 0), scale)) g_confirm_quit = false, ImGui::OpenPopup("##confirm");
+    ImGui::SameLine(0, gap);
+    if (skin_widget_button(quit, ImVec2(bw, 0), scale)) g_confirm_quit = true, ImGui::OpenPopup("##confirm");
+    restart_confirm(scale);
     menu_sounds_frame();
     bool was_modal = g_modal || binds_modal();
-    if (g_tab != TAB_CONTROLS) g_modal = false;
     if (!was_modal && (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)))
         set_open(0);
     ImGui::End();
@@ -1205,54 +1316,13 @@ static void perf_tick(uint64_t now, const MenuTarget *t) {
     g_perf_last_ns = now;
 }
 
-// The panel keeps its width while the numbers change: every column is as wide as the widest text it can show, measured
-// on samples of 8s (Roboto's digits share one width), and the numbers are right-aligned in it.
-struct PerfCol { UiTextId fmt; float sample; };
-
-static float perf_text_w(UiTextId fmt, float v) {
-    char b[64];
-    snprintf(b, sizeof b, menu_text(fmt), v);
-    return ImGui::CalcTextSize(b).x;
-}
-
-// A fixed column as wide as the widest of the formats (with their samples) and labels given.
-static void perf_column(const char *id, const PerfCol *cols, int n, const UiTextId *labels = nullptr, int nl = 0) {
-    float w = ImGui::CalcTextSize(menu_text(UI_MENU_OV_NONE)).x;
-    for (int i = 0; i < n; i++) w = fmaxf(w, perf_text_w(cols[i].fmt, cols[i].sample));
-    for (int i = 0; i < nl; i++) w = fmaxf(w, ImGui::CalcTextSize(menu_text(labels[i])).x);
-    ImGui::TableSetupColumn(id, ImGuiTableColumnFlags_WidthFixed, w);
-}
-
-static void perf_right(const char *s, bool dim) {
-    float pad = ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize(s).x;
-    if (pad > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + pad);
-    if (dim) ImGui::TextDisabled("%s", s);
-    else ImGui::TextUnformatted(s);
-}
-
-// One cell of the full panel's table: fmt (a catalog format, one number) with v, or "-" when the machine gives none.
-static void perf_cell(UiTextId fmt, float v) {
-    ImGui::TableNextColumn();
-    if (v < 0) return perf_right(menu_text(UI_MENU_OV_NONE), true);
-    char b[64];
-    snprintf(b, sizeof b, menu_text(fmt), v);
-    perf_right(b, false);
-}
-
-static void perf_label(UiTextId label, const ImVec4 &c) {
-    ImGui::TableNextColumn();
-    ImGui::TextColored(c, "%s", menu_text(label));
-}
-
-static float perf_gb(float mb) { return mb < 0 ? -1 : mb / 1024; }
-
 // The picture lines: the window, the game image the present shows and the 3D scene it holds (resolution.c), how the
 // present scales the image to the window (gfx_present.c, the last present), the frame limit and the presentation mode
-// in use.
-static void perf_picture(const MenuTarget *t, const ImVec4 &c) {
+// in use; formatted into the panel's picture lines.
+static void perf_picture(const MenuTarget *t, PerfPanel *p) {
     unsigned out[2], scene[2];
     res_sizes(out, scene);
-    char v[6][64];
+    char (*v)[64] = p->picture;
     snprintf(v[0], sizeof v[0], menu_text(UI_MENU_OV_FMT_SIZE), t->width, t->height);
     snprintf(v[1], sizeof v[1], menu_text(UI_MENU_OV_FMT_SIZE), (unsigned)t->image_w, (unsigned)t->image_h);
     snprintf(v[2], sizeof v[2], menu_text(UI_MENU_OV_FMT_SCENE), scene[0], scene[1], scene[0] * 100.0 / out[0]);
@@ -1274,42 +1344,16 @@ static void perf_picture(const MenuTarget *t, const ImVec4 &c) {
     if (hz > 0) snprintf(v[4], sizeof v[4], menu_text(UI_MENU_OV_FPS), hz);
     const char *pm = present_name(gfx_window_present_mode());
     snprintf(v[5], sizeof v[5], "%s", pm ? pm : menu_text(UI_MENU_OV_NONE));
-    static const UiTextId labels[6] = {UI_MENU_OV_WINDOW, UI_MENU_OV_OUTPUT, UI_MENU_OV_SCENE,
-                                       UI_MENU_OV_SCALING, UI_MENU_OV_LIMIT, UI_MENU_OV_PRESENT};
-    // The 3D scene's size is known only where resolution.c sets it (the builds with its patch sets); Ocarina sizes its own scene
-    // dynamically and res_sizes would report a fixed 1600x900, so the line is left out
-    bool scene_known = res_adjustable() != 0;
-    if (!ImGui::BeginTable("##perfp", 2, ImGuiTableFlags_SizingFixedFit)) return;
-    float vw = 0;
-    for (auto &s : v) vw = fmaxf(vw, ImGui::CalcTextSize(s).x);
-    ImGui::TableSetupColumn("##p0", ImGuiTableColumnFlags_WidthStretch);
-    ImGui::TableSetupColumn("##p1", ImGuiTableColumnFlags_WidthFixed, vw);
-    for (int i = 0; i < 6; i++) {
-        if (i == 2 && !scene_known) continue;
-        perf_label(labels[i], c);
-        ImGui::TableNextColumn();
-        perf_right(v[i], false);
-    }
-    ImGui::EndTable();
+    // The 3D scene's size is known only where resolution.c sets it (the builds with its patch sets); Ocarina sizes its
+    // own scene dynamically and res_sizes would report a fixed 1600x900, so the line is left out
+    p->scene_known = res_adjustable() != 0;
 }
 
+// The full panel (ui/perf_panel.cpp draws it in the menu's look): the numbers of this frame.
 static void perf_full_draw(const MenuTarget *t, float scale) {
-    float w = (float)t->width;
-    PerfStats s;
-    perfmon_snapshot(&s);
-    ImGui::SetNextWindowPos(ImVec2(w - 12 * scale, 12 * scale), ImGuiCond_Always, ImVec2(1, 0));
-    ImGui::SetNextWindowBgAlpha(0.6f);
-    ImGui::Begin("##perf", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                                        ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
-                                        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
-    // under the menu while it is open (the settings stay readable), else over everything
-    if (g_open.load(std::memory_order_relaxed)) ImGui::BringWindowToDisplayBack(ImGui::GetCurrentWindow());
-    else ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
-    ImGui::SetWindowFontScale(0.72f);
-    const ImVec4 gpu_c(0.55f, 0.83f, 0.31f, 1), cpu_c(0.18f, 0.59f, 0.80f, 1), ram_c(0.80f, 0.45f, 0.70f, 1),
-        fps_c(0.95f, 0.95f, 0.95f, 1), wait_c(0.93f, 0.76f, 0.33f, 1), pic_c(0.62f, 0.70f, 0.95f, 1);
-    // the port version and the game update first, so a screenshot in a bug report carries both; formatted once per
-    // menu language
+    static PerfPanel p;
+    perfmon_snapshot(&p.s);
+    // the port version and the game update, formatted once per menu language
     static char ver[96];
     static const char *ver_fmt;
     if (ver_fmt != menu_text(UI_MENU_VERSION)) {
@@ -1318,82 +1362,11 @@ static void perf_full_draw(const MenuTarget *t, float scale) {
         snprintf(game, sizeof game, "%d.%d.%d", rt_game_version / 100, rt_game_version / 10 % 10, rt_game_version % 10);
         snprintf(ver, sizeof ver, ver_fmt, rt_port_version, game);
     }
-    ImGui::TextDisabled("%s", ver);
-    if (ImGui::BeginTable("##perft", 4, ImGuiTableFlags_SizingFixedFit)) {
-        static const UiTextId labels[] = {UI_MENU_OV_GPU, UI_MENU_OV_VRAM, UI_MENU_OV_CPU, UI_MENU_OV_RAM,
-                                          UI_MENU_OV_FPS_LABEL, UI_MENU_OV_FRAME_LABEL};
-        static const PerfCol c1[] = {{UI_MENU_OV_FMT_PCT, 100}, {UI_MENU_OV_FMT_GB, 888.8f}, {UI_MENU_OV_FMT_FPS, 888},
-                                     {UI_MENU_OV_FRAME_MS, 888.8f}};
-        static const PerfCol c2[] = {{UI_MENU_OV_FMT_TEMP, 188}, {UI_MENU_OV_FMT_GB_OF, 888.8f}, {UI_MENU_OV_LOW1, 888},
-                                     {UI_MENU_OV_MAX_MS, 8888.8f}};
-        static const PerfCol c3[] = {{UI_MENU_OV_FMT_POWER, 888}, {UI_MENU_OV_FMT_MHZ, 8888}, {UI_MENU_OV_GAME_PCT, 100},
-                                     {UI_MENU_OV_GAME_GB, 888.8f}, {UI_MENU_OV_LOW01, 888}};
-        perf_column("##c0", nullptr, 0, labels, 6);
-        perf_column("##c1", c1, 4);
-        perf_column("##c2", c2, 4);
-        perf_column("##c3", c3, 5);
-        perf_label(UI_MENU_OV_GPU, gpu_c);
-        perf_cell(UI_MENU_OV_FMT_PCT, s.gpu_pct);
-        perf_cell(UI_MENU_OV_FMT_TEMP, s.gpu_temp_c);
-        perf_cell(UI_MENU_OV_FMT_POWER, s.gpu_power_w);
-        perf_label(UI_MENU_OV_VRAM, gpu_c);
-        perf_cell(UI_MENU_OV_FMT_GB, perf_gb(s.vram_used_mb));
-        perf_cell(UI_MENU_OV_FMT_GB_OF, perf_gb(s.vram_total_mb));
-        perf_cell(UI_MENU_OV_FMT_MHZ, s.gpu_clock_mhz);
-        perf_label(UI_MENU_OV_CPU, cpu_c);
-        perf_cell(UI_MENU_OV_FMT_PCT, s.cpu_total_pct);
-        perf_cell(UI_MENU_OV_FMT_TEMP, s.cpu_temp_c);
-        perf_cell(UI_MENU_OV_GAME_PCT, s.cpu_game_pct);
-        perf_label(UI_MENU_OV_RAM, ram_c);
-        perf_cell(UI_MENU_OV_FMT_GB, perf_gb(s.ram_used_mb));
-        perf_cell(UI_MENU_OV_FMT_GB_OF, perf_gb(s.ram_total_mb));
-        perf_cell(UI_MENU_OV_GAME_GB, perf_gb(s.ram_game_mb));
-        ImGui::TableNextRow(ImGuiTableRowFlags_None, 6 * scale);   // a gap between the machine and the frames
-        // the frames: the rate over the last second with the lows over the last ten seconds, then the frame times
-        perf_label(UI_MENU_OV_FPS_LABEL, fps_c);
-        perf_cell(UI_MENU_OV_FMT_FPS, s.fps);
-        perf_cell(UI_MENU_OV_LOW1, s.low1_fps);
-        perf_cell(UI_MENU_OV_LOW01, s.low01_fps);
-        if (gfx_output_fps() > 0) {   // frame generation: what the display gets, generated frames included
-            perf_label(UI_MENU_OV_FG_LABEL, fps_c);
-            perf_cell(UI_MENU_OV_FMT_FPS, (float)gfx_output_fps());
-            ImGui::TableNextColumn();
-            ImGui::TableNextColumn();
-        }
-        perf_label(UI_MENU_OV_FRAME_LABEL, fps_c);
-        perf_cell(UI_MENU_OV_FRAME_MS, s.frame_ms_avg);
-        perf_cell(UI_MENU_OV_MAX_MS, s.frame_ms_max);
-        ImGui::TableNextColumn();
-        ImGui::EndTable();
-    }
-    float top = s.frame_ms_max > 50 ? s.frame_ms_max : 50;
-    // as wide as the panel the tables size; the plot does not count toward that width, so the panel can still shrink
-    ImGuiWindow *win = ImGui::GetCurrentWindow();
-    float max_x = win->DC.CursorMaxPos.x;
-    ImGui::PlotLines("##ft", s.frame_ms, PERF_HISTORY, 0, nullptr, 0, top, ImVec2(-FLT_MIN, 48 * scale));
-    win->DC.CursorMaxPos.x = max_x;
-    // per frame, averaged over the last half second; the labels' column stretches, so the numbers end at the panel's
-    // right edge, and the table still asks for no more than its widest label and number
-    if (ImGui::BeginTable("##perfw", 2, ImGuiTableFlags_SizingFixedFit)) {
-        static const PerfCol c1[] = {{UI_MENU_OV_FMT_MS, 888.88f}, {UI_MENU_OV_PER_FRAME, 888.8f}};
-        ImGui::TableSetupColumn("##w0", ImGuiTableColumnFlags_WidthStretch);
-        perf_column("##w1", c1, 2);
-        perf_label(UI_MENU_OV_REPLAY, wait_c);
-        perf_cell(UI_MENU_OV_FMT_MS, s.replay_ms);
-        perf_label(UI_MENU_OV_GPU_TIME, wait_c);
-        perf_cell(UI_MENU_OV_FMT_MS, s.gpu_ms);
-        perf_label(UI_MENU_OV_PIPE_WAIT, wait_c);
-        perf_cell(UI_MENU_OV_FMT_MS, s.pipe_wait_ms);
-        perf_label(UI_MENU_OV_SHADER_WAIT, wait_c);
-        perf_cell(UI_MENU_OV_FMT_MS, s.xlate_ms);
-        perf_label(UI_MENU_OV_TEX_UPLOADS, wait_c);
-        perf_cell(UI_MENU_OV_PER_FRAME, s.tex_uploads);
-        ImGui::EndTable();
-    }
-    perf_picture(t, pic_c);
-    if (s.gpu_name[0]) ImGui::TextDisabled("%s", s.gpu_name);
-    if (s.cpu_name[0]) ImGui::TextDisabled("%s", s.cpu_name);
-    ImGui::End();
+    p.version = ver;
+    perf_picture(t, &p);
+    p.fg_fps = gfx_output_fps() > 0 ? (float)gfx_output_fps() : 0;
+    p.under_menu = g_open.load(std::memory_order_relaxed) != 0;
+    perf_panel_draw(&p, (float)t->width, scale);
 }
 
 static void perf_draw(const MenuTarget *t, float scale) {
@@ -1403,14 +1376,21 @@ static void perf_draw(const MenuTarget *t, float scale) {
     // with the menu open: under its window, over the dimming layout_menu drew before
     ImDrawList *dl = g_open.load(std::memory_order_relaxed) ? ImGui::GetBackgroundDrawList() : ImGui::GetForegroundDrawList();
     ImVec2 sz = ImGui::CalcTextSize(g_perf_text);
-    float pad = 6 * scale;
-    ImVec2 p(w - 12 * scale - sz.x - pad * 2, 12 * scale);   // the top right corner: the game's HUD leaves it empty
-    dl->AddRectFilled(p, ImVec2(p.x + sz.x + pad * 2, p.y + sz.y + pad * 2), IM_COL32(0, 0, 0, 150), 4 * scale);
-    dl->AddText(ImVec2(p.x + pad, p.y + pad), IM_COL32(255, 255, 255, 235), g_perf_text);
+    float padx = 14 * scale, pady = 9 * scale;
+    ImVec2 p(w - 12 * scale - sz.x - padx * 2, 12 * scale);   // the top right corner: the game's HUD leaves it empty
+    // a small panel in the menu's look (ui/menu_skin.cpp), its frame scaled to the line
+    skin_panel(dl, p, ImVec2(p.x + sz.x + padx * 2, p.y + sz.y + pady * 2), scale * 0.6f, 0.9f);
+    dl->AddText(ImVec2(p.x + padx, p.y + pady), SKIN_TEXT, g_perf_text);
 }
 
 extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot) {
     *shot = NULL;
+    if (t->phys && t->phys != g_gpu_vendor_of) {   // the GPU's vendor for the rows that depend on it (dlss_offered)
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(t->phys, &props);
+        g_gpu_vendor.store(props.vendorID, std::memory_order_relaxed);
+        g_gpu_vendor_of = t->phys;
+    }
     menu_art_start();      // the game's interface textures decode on a worker from the first present on
     cheats_frame(frame);   // the data cheats and the buttons of the cheats that need them held
     if (!g_test.parsed) test_parse();
@@ -1418,7 +1398,13 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
     if (g_perf_save.exchange(0)) cfg_save();
     perf_tick(plat_now_ns(), t);
     amiibo_tick();
+    if (g_booting.load(std::memory_order_relaxed)) g_booting.store(0, std::memory_order_release);   // the game runs
     bool open = g_open.load(std::memory_order_relaxed);
+    // the frame the menu is first laid out after opening: also when its g_reset went to an earlier frame of the overlay
+    // alone (the menu opened between the two loads), the pad's buttons held now must not count as presses
+    static bool was_open;
+    bool opened = open && !was_open;
+    was_open = open;
     if (!open) {
         if (g_save_pending) g_save_pending = opt_save_tick(1);   // closed: the last change goes to nx2navi.ini now
         if (g_test.at && !g_test.opened && frame >= g_test.at) {
@@ -1437,8 +1423,8 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
     }
     uint64_t t0 = plat_now_ns();
     if (!g_ctx_ok) make_context();
-    float scale = menu_scale(t->height);
-    if (!vk_up(t) || (g_font_scale != scale && !fonts_up(scale))) {
+    float scale = menu_scale(t->width, t->height);
+    if (!vk_up(t) || !fonts_for(scale, t0)) {
         rt_log("menu: Dear ImGui Vulkan back end set-up failed; the menu stays closed");
         g_failed.store(1);
         set_open(0);
@@ -1452,9 +1438,16 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
     list_gpus(t->instance);
     ImGuiIO &io = ImGui::GetIO();
     int reset = g_reset.exchange(0);
+    // Read again after taking the reset: the menu may have opened since the read above (F1 on the window thread while
+    // the overlay alone was drawn), and that frame's reset would be spent on an overlay frame, so the first open frame
+    // ran without its focus row and with the opening key still down.
+    open = g_open.load(std::memory_order_acquire);
     if (reset) {
+        io.ClearEventsQueue();   // events handed over before the close and not yet taken (ImGui spreads them over frames)
         io.ClearInputKeys();
         io.ClearInputMouse();
+        binds_cancel();          // a cell waiting for a press when the menu closed: no press binds on the next opening
+        g_sound_fresh = true;
         g_last_ns = 0;
         g_focus_page = g_tab_request >= 0 ? g_tab_request : g_tab;   // opening: the first row has the cursor
         if (GImGui->OpenPopupStack.Size) ImGui::ClosePopupToLevel(0, false);   // a confirmation left open on closing
@@ -1467,7 +1460,7 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
     if (!open) {   // the overlay alone: no input reaches ImGui
     } else if (g_test.page < 0) {
         drain_events(io);
-        pad_events(io, reset);
+        pad_events(io, reset || opened);
     } else {   // the test hook's pages: the user's input in a background test window must not change settings
         plat_mutex_lock(&ev_lock);
         ev_n = 0;
@@ -1505,20 +1498,20 @@ extern "C" void menu_boot_set(int phase, long long done, long long total) {
     g_boot_done.store(done, std::memory_order_relaxed);
     g_boot_total.store(total, std::memory_order_relaxed);
     g_boot_phase.store(phase, std::memory_order_release);
-    g_booting.store(phase >= 0, std::memory_order_release);
 }
 
-// A panel in the middle of the screen in the menu's colours: the title, the step with its count and a bar, and why it
-// happens. The input queue is left alone: keys pressed now reach the menu once the game runs.
+// A box in the middle of the screen in the menu's look (ui/menu_skin.cpp skin_boot_panel): the title, the step with its
+// count and a bar, and why it happens. The input queue is left alone: keys pressed now reach the menu once the game runs.
 extern "C" int menu_boot_frame(const MenuTarget *t) {
     if (g_failed_flag() || g_boot_phase.load(std::memory_order_acquire) < 0) return 0;   // -1: done, a black frame
     if (!g_ctx_ok) make_context();
-    float scale = menu_scale(t->height);
-    if (!vk_up(t) || (g_font_scale != scale && !fonts_up(scale))) {
+    float scale = menu_scale(t->width, t->height);
+    if (!vk_up(t) || !fonts_for(scale, plat_now_ns())) {
         rt_log("menu: Dear ImGui Vulkan back end set-up failed; no boot screen, and the menu stays closed");
         g_failed.store(1);
         return 0;
     }
+    menu_art_start();   // the box takes the game's textures as soon as they are decoded, plain shapes until then
     if (g_style_scale != scale) {
         ImGui::GetStyle() = g_base_style;
         ImGui::GetStyle().ScaleAllSizes(scale);
@@ -1543,41 +1536,16 @@ extern "C" int menu_boot_frame(const MenuTarget *t) {
         snprintf(step, sizeof step, "%s", ui_text(UI_BOOT_STARTING));
     const char *title = ui_text(UI_BOOT_TITLE), *hint = ui_text(UI_BOOT_HINT);
 
-    ImDrawList *dl = ImGui::GetForegroundDrawList();
-    float w = (float)t->width, h = (float)t->height, pad = 34 * scale, gap = 16 * scale;
+    // the box in the menu's look (ui/menu_skin.cpp): a filled bar while there is a count, else a sweeping segment
     ImFont *body = ImGui::GetFont();
     float body_px = ImGui::GetFontSize();
     ImFont *head = g_title_font ? g_title_font : body;
-    float head_px = g_title_font ? g_title_font->FontSize : body_px * 1.2f;
-    ImVec2 ts = head->CalcTextSizeA(head_px, FLT_MAX, 0, title), ss = body->CalcTextSizeA(body_px, FLT_MAX, 0, step),
-           hs = body->CalcTextSizeA(body_px * 0.8f, FLT_MAX, 0, hint);
-    float bar_h = 10 * scale;
-    float pw = fmaxf(fmaxf(ts.x, hs.x), 560 * scale) + pad * 2;
-    float ph = pad + ts.y + gap * 1.5f + ss.y + gap * 0.6f + bar_h + gap * 1.4f + hs.y + pad;
-    ImVec2 a((w - pw) / 2, (h - ph) / 2), b(a.x + pw, a.y + ph);
-    ImU32 gold = ImGui::GetColorU32(kGold), panel = ImGui::GetColorU32(kNavy);
-    ImU32 text = IM_COL32(236, 224, 196, 255), dim = IM_COL32(236, 224, 196, 150);
-    dl->AddRectFilled(a, b, panel, 10 * scale);
-    dl->AddRect(a, b, IM_COL32(237, 194, 97, 140), 10 * scale, 0, 1.5f * scale);
-    float y = a.y + pad;
-    dl->AddText(head, head_px, ImVec2((w - ts.x) / 2, y), gold, title);
-    y += ts.y + gap * 1.5f;
-    dl->AddText(body, body_px, ImVec2(a.x + pad, y), text, step);
-    y += ss.y + gap * 0.6f;
-    ImVec2 ba(a.x + pad, y), bb(b.x - pad, y + bar_h);
-    dl->AddRectFilled(ba, bb, IM_COL32(255, 255, 255, 28), bar_h / 2);
-    if ((phase == 1 || phase == 2) && total > 0) {
-        float f = (float)done / (float)total;
-        f = f < 0 ? 0 : f > 1 ? 1 : f;
-        if (f > 0) dl->AddRectFilled(ba, ImVec2(ba.x + (bb.x - ba.x) * f, bb.y), gold, bar_h / 2);
-    } else {   // no count yet: a short segment sweeps along the bar
-        float span = (bb.x - ba.x) * 0.2f, run = (bb.x - ba.x) - span;
-        float s = (float)fmod((now - g_boot_t0) / 1e9 * 0.8, 2.0);
-        float x = ba.x + run * (s < 1 ? s : 2 - s);
-        dl->AddRectFilled(ImVec2(x, ba.y), ImVec2(x + span, bb.y), gold, bar_h / 2);
-    }
-    y += bar_h + gap * 1.4f;
-    dl->AddText(body, body_px * 0.8f, ImVec2((w - hs.x) / 2, y), dim, hint);
+    float head_px = g_title_font ? g_title_font->FontSize * io.FontGlobalScale : body_px * 1.2f;   // as GetFontSize scales
+    float frac = -1;
+    if ((phase == 1 || phase == 2) && total > 0) frac = done <= 0 ? 0 : done >= total ? 1 : (float)done / (float)total;
+    float s = (float)fmod((now - g_boot_t0) / 1e9 * 0.8, 2.0);
+    skin_boot_panel(ImGui::GetForegroundDrawList(), head, head_px, body, body_px, title, step, hint, frac, s < 1 ? s : 2 - s,
+                    (float)t->width, (float)t->height, scale);
     ImGui::Render();
     return ImGui::GetDrawData()->TotalVtxCount > 0;
 }

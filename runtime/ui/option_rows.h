@@ -36,6 +36,10 @@ void opt_text(UiTextId text, bool warn = false);
 // The return value of every row: true when it changed the setting this frame.
 // inverted: the row shows "on" while the key is 0 (a setting whose key names the opposite).
 bool opt_toggle(const char *key, UiTextId label, UiTextId desc, bool inverted = false);
+// An on/off row over a key with named values: off while the key holds off_value and on for any other, so a value the
+// row does not write itself still reads as on. Flipping it writes on_value or off_value. note: as for opt_choice.
+bool opt_toggle_value(const char *key, UiTextId label, UiTextId desc, const char *on_value, const char *off_value,
+                      const char *note = nullptr);
 // One name per value of the key's cfg_meta values list, in its order. When the key has no fixed default (an empty
 // def), names[0] is the automatic choice (the key unset) and names[1..] follow the values. note: a short line under
 // the value in place of the "default" mark (NULL: none).

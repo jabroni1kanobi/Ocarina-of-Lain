@@ -191,6 +191,11 @@ INSTALL_SIDE = {'romfs.c', 'patches.c', 'ov_zstd.c', 'mouse_direct.c'}
 LIB_NAME = 'libnx2navirt.a'
 AR = UCRT / 'llvm-ar.exe' if WIN else on_path('llvm-ar')
 WINDRES = UCRT / 'windres.exe'   # runtime/nx2navi.rc: the manifest of nx2navi.exe
+# GNU windres runs its preprocessor through cmd.exe, and left to find it names the gcc beside it by full path: once that
+# path and the .rc's both hold a space, cmd.exe drops the outer quotes and splits the command at the first space. gcc by
+# bare name (Ninja's PATH starts with UCRT) and the .rc by its path below MAIN_ROOT keep the command line free of
+# spaces. llvm-windres (--toolchain) starts its preprocessor without a shell and keeps its own.
+WINDRES_PP = '--preprocessor=gcc --preprocessor-arg=-E --preprocessor-arg=-xc --preprocessor-arg=-DRC_INVOKED'
 TOOLCHAIN_BIN = None   # llvm-mingw bin directory, set by main() for --toolchain
 DEPS = None            # the deps directory of an llvm-mingw build
 # tools/data/expected-<display version>.json for each build version name.
@@ -405,7 +410,8 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
         '  description = CC $in',
         '',
         'rule rc',
-        f'  command = {cmd_arg(WINDRES.as_posix())} -I {cmd_path(RUNTIME)} -O coff $in -o $out',
+        f'  command = {cmd_arg(WINDRES.as_posix())}{"" if "llvm" in WINDRES.name else " " + WINDRES_PP} '
+        f'-I {cmd_path(RUNTIME)} -O coff $in -o $out',
         '  description = RC $in',
         '',
         'rule link',

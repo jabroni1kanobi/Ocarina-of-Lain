@@ -1,5 +1,6 @@
 """The launcher's window, laid out like the game's options menu (docs/launcher.md, "Look"): a wooden title band with
-the Triforce and the name in the game's Cetra Display, a list of rows on the left (a bronze label cell and a dark value cell each), a white
+Navi and the name in the game's Cetra Display across the whole top (the window's own title bar: drag it to move the
+window, minimise and close at its right end), a list of rows on the left (a bronze label cell and a dark value cell each), a white
 glowing cursor on the selected row, filigree dividers between groups and a description box on the right that
 explains the selected row.
 
@@ -25,12 +26,13 @@ import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog
 
-from .. import NAME, build, feed, gamefiles, jobs, versions, winsys
+from .. import NAME, build, feed, gamefiles, jobs, saves, versions, winsys
 from ..context import Context
 from . import art
 
 W, H = 1000, 640
-BAND = (52, 948, 56)            # x0, x1, height
+BAND = (0, 1000, 56)            # x0, x1, height: the whole top of the window, which is also its title bar
+TITLE_BUTTONS = (('min', 908, 954), ('close', 954, 1000))   # x ranges on the band
 PANEL = (112, 60, 580)          # x0, top, x1
 ROWS = (140, 552, 96)           # x0, x1, top
 LABEL_W = 222                   # 54 % of the row
@@ -105,6 +107,7 @@ class App:
         self.check_error = ''
         self.checked_at = 0.0
         self.message = ''
+        self.save_message = ''   # the last Import Saves result, shown in its description
         self.dumps = None
         self.dump_search = None
         self.uninstall_game = False
@@ -112,6 +115,9 @@ class App:
         self.cursor_frames, self.cursor_k = [], 0
         self.last_second = 0
         self.gamepad = winsys.Gamepad()
+        self.tb_hover = None
+        self.drag = None
+        self.ico = None
 
         root.title(NAME)
         root.resizable(False, False)
@@ -128,6 +134,8 @@ class App:
         self.root.after(150, self.tick)
         self.root.after(50, self.poll_gamepad)
         self.center()
+        self.framed = not winsys.frameless(root)   # Windows: the band is the title bar
+        self.root.after(60, self.native_window)
 
     # ---------------------------------------------------------------- scale, icon, fonts
 
@@ -151,16 +159,26 @@ class App:
         self.root.geometry(f'{w}x{h}+{x}+{y}')
 
     def set_icon(self):
+        """Navi as the window's icon: Tk's photo icon everywhere, and on Windows the .ico set on the window itself, so
+        the taskbar button shows Navi rather than Python's icon."""
         try:
-            self.photos['icon'] = art.photo(self.root, art.triforce(64))
+            self.photos['icon'] = art.photo(self.root, art.navi_icon(64))
             self.root.iconphoto(True, self.photos['icon'])
             if os.name == 'nt':
-                ico = self.layout.cache / 'nx2navi.ico'
-                if not ico.is_file():
-                    ico.write_bytes(art.triforce_ico())
-                self.root.iconbitmap(default=str(ico))
+                data = art.navi_ico()
+                self.ico = self.layout.cache / 'nx2navi.ico'
+                if not self.ico.is_file() or self.ico.read_bytes() != data:
+                    self.ico.write_bytes(data)
         except (tk.TclError, OSError) as e:
             self.ctx.log(f'icon: {e}')
+
+    def native_window(self):
+        if self.ico:
+            winsys.set_window_icon(self.root, self.ico)
+        try:
+            self.root.focus_force()
+        except tk.TclError:
+            pass
 
     def load_fonts(self):
         """The game's Cetra Display when this PC has decoded it from the player's game (data/cache/fonts), else the
@@ -239,23 +257,47 @@ class App:
         c.create_image(0, 0, anchor='nw', image=self.sprite('backdrop', lambda: art.backdrop(self.X(W), self.X(H), s)),
                        tags='static')
         bx0, bx1, bh = BAND
-        c.create_image(self.X(bx0), 0, anchor='nw', tags='static',
-                       image=self.sprite('band', lambda: art.band(self.X(bx1) - self.X(bx0), self.X(bh), s)))
         px0, ptop, px1 = PANEL
         c.create_image(self.X(px0), self.X(ptop), anchor='nw', tags='static',
                        image=self.sprite('panel', lambda: art.panel(self.X(px1) - self.X(px0), self.X(H - ptop), s)))
-        tri = self.sprite('triforce', lambda: art.triforce(self.X(44)))
+        c.create_image(self.X(bx0), 0, anchor='nw', tags='static',
+                       image=self.sprite('band', lambda: art.band(self.X(bx1) - self.X(bx0), self.X(bh), s)))
+        k = max(1, int(round(2 * s)))   # Navi in whole pixels: two screen pixels per artwork pixel at 100 %
+        emblem = self.sprite(('navi', k), lambda: art.navi(k))
+        ew = emblem.width()
         title_w = self.f['band'].measure(NAME)
         gap = self.X(12)
-        total = self.X(44) + gap + title_w
-        x = self.X(W / 2) - total // 2
-        c.create_image(x, self.X(bh / 2), anchor='w', image=tri, tags='static')
-        tx = x + self.X(44) + gap
+        x = self.X(W / 2) - (ew + gap + title_w) // 2
+        c.create_image(x, self.X(bh / 2), anchor='w', image=emblem, tags='static')
+        tx = x + ew + gap
         c.create_text(tx + 1, self.X(bh / 2) + self.X(2), text=NAME, anchor='w', font=self.f['band'], fill='#1a120a',
                       tags='static')
         c.create_text(tx, self.X(bh / 2), text=NAME, anchor='w', font=self.f['band'], fill=P['band_text'],
                       tags='static')
+        c.create_rectangle(0, 0, self.X(W) - 1, self.X(H) - 1, outline='#140e09', tags='static')
         c.tag_lower('static')
+        self.draw_title_buttons()
+
+    def draw_title_buttons(self):
+        """Minimise and close at the band's right end, lit when the mouse is over them."""
+        c, X = self.canvas, self.X
+        c.delete('tb')
+        bh = X(BAND[2])
+        for kind, x0, x1 in TITLE_BUTTONS:
+            if self.tb_hover == kind:
+                c.create_rectangle(X(x0), 0, X(x1), bh - 1, outline='', tags='tb',
+                                   fill=P['close_hover'] if kind == 'close' else P['button_hover'])
+            size = X(12)
+            glyph = self.sprite(('glyph', kind, size), lambda kd=kind: art.title_glyph(kd, size, self.s))
+            c.create_image((X(x0) + X(x1)) // 2, bh // 2, image=glyph, tags='tb')
+
+    def title_button_at(self, x, y):
+        if y >= self.X(BAND[2]):
+            return None
+        for kind, x0, x1 in TITLE_BUTTONS:
+            if self.X(x0) <= x < self.X(x1):
+                return kind
+        return None
 
     # ---------------------------------------------------------------- input
 
@@ -269,6 +311,10 @@ class App:
             r.bind(key, fn)
         self.canvas.bind('<Motion>', self.on_motion)
         self.canvas.bind('<Button-1>', self.on_click)
+        self.canvas.bind('<B1-Motion>', self.on_drag)
+        self.canvas.bind('<ButtonRelease-1>', lambda e: setattr(self, 'drag', None))
+        self.canvas.bind('<Leave>', lambda e: self.set_tb_hover(None))
+        r.bind('<Alt-F4>', lambda e: self.on_close())
         r.protocol('WM_DELETE_WINDOW', self.on_close)
 
     def poll_gamepad(self):
@@ -344,7 +390,18 @@ class App:
                     return i
         return None
 
+    def set_tb_hover(self, kind):
+        if kind != self.tb_hover:
+            self.tb_hover = kind
+            self.draw_title_buttons()
+
+    def on_drag(self, e):
+        if self.drag:   # moving the window without the system's help (Linux)
+            dx, dy = self.drag
+            self.root.geometry(f'+{e.x_root - dx}+{e.y_root - dy}')
+
     def on_motion(self, e):
+        self.set_tb_hover(self.title_button_at(e.x, e.y))
         i = self.hit(e.x, e.y)
         if i is not None and i != self.focus:
             self.focus = i
@@ -360,6 +417,22 @@ class App:
                 self.render()
 
     def on_click(self, e):
+        try:
+            self.root.focus_force()
+        except tk.TclError:
+            pass
+        kind = self.title_button_at(e.x, e.y)
+        if kind == 'close':
+            self.on_close()
+            return
+        if kind == 'min':
+            self.set_tb_hover(None)
+            winsys.minimize(self.root)
+            return
+        if e.y < self.X(BAND[2]):   # the band moves the window, like a title bar
+            if not winsys.start_drag(self.root):
+                self.drag = (e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y())
+            return
         i = self.hit(e.x, e.y)
         if i is None:
             return
@@ -597,14 +670,54 @@ class App:
             upd,
             Row('divider'),
             Row('value', 'Game Folder', gd, on=lambda: self.open(gd),
-                desc=('Open the game folder. Your saves are in its profile folder, the game\'s settings in '
-                      'nx2navi.ini and its logs in logs.',)),
+                desc=('Open the game folder. The game keeps your save in its profile folder, its settings in '
+                      'nx2navi.ini and its logs in logs. Its saves folder is for saves to import.',)),
+            self.saves_row(gd),
             Row('value', 'Rebuild the Game', rebuild_value, rebuild_style, on=self.start_rebuild,
                 desc=('Build the game again from the files of the last build. Only what changed is compiled. Use it '
                       'after changing build tools, or if the game stopped starting.',)),
             Row('value', 'Settings', '', 'arrow', on=lambda: self.show('settings'),
                 desc=('Updates, the game folder, the logs and uninstalling.',)),
         ]
+
+    def saves_row(self, gd):
+        """Import Saves: a save put into the game folder's saves folder, else a folder the player picks."""
+        ready = False
+        if gd and Path(gd).is_dir():
+            try:
+                saves.ensure_saves_dir(gd)
+                ready = saves.waiting(gd)[0] is not None
+            except OSError:
+                pass
+        desc = ('Bring in a save from a Switch save backup, an emulator or another NX2navi install. Put it into the '
+                'saves folder of the game folder and select this row, or select this row and choose its folder.',
+                'Your current save is copied to the saves folder first.')
+        if self.save_message:
+            desc = (self.save_message,) + desc
+        return Row('value', 'Import Saves', 'From the Saves Folder' if ready else 'Choose a Folder',
+                   'orange_arrow' if ready else 'arrow', on=self.import_saves, desc=desc)
+
+    def import_saves(self):
+        gd = self.settings.get('game_dir')
+        if not gd or not Path(gd).is_dir():
+            self.save_message = 'Install the game first.'
+        elif (self.game_proc and self.game_proc.poll() is None) or saves.game_running(gd):
+            self.save_message = 'Quit the game first: it keeps its save open while it runs.'
+        else:
+            try:
+                folder = None
+                if saves.waiting(gd)[0] is None:
+                    folder = filedialog.askdirectory(parent=self.root, title='Choose the folder with the save',
+                                                     initialdir=str(saves.ensure_saves_dir(gd)), mustexist=True)
+                    if not folder:
+                        return
+                r = saves.import_save(gd, folder, log=self.ctx.log)
+            except (saves.SaveError, OSError) as e:
+                self.save_message = f'The save was not imported: {e}'
+            else:
+                self.save_message = (f'Save imported: {r["files"]} files from {r["source"].name}.'
+                                     + (f' Your old save is in saves\\{r["backup"].name}.' if r['backup'] else ''))
+        self.show('home', self.focus)
 
     def update_desc(self):
         r = self.release
@@ -1083,6 +1196,12 @@ class App:
             cw, ch = X(9), X(12)
             img = self.sprite(('chev', cw, ch, False, 'dim'), lambda: art.chevron(cw, ch, '#d9ccae'))
             c.create_image(x1 - X(16), cy, anchor='e', image=img, tags='dyn')
+            if r.value:   # a value, centred in the cell's room left of the arrow
+                right = x1 - X(16) - cw - X(10)
+                avail = right - vx0 - X(16)
+                vfont = self.fit_font(vfont, r.value, avail, 0.8)
+                c.create_text((vx0 + right) // 2, cy, text=fit(vfont, r.value, avail), font=vfont,
+                              fill=P['value_text'], tags='dyn')
         else:
             color = {'normal': P['value_text'], 'dim': P['dim'], 'salmon': P['salmon']}.get(r.style, P['value_text'])
             avail = (x1 - vx0) - X(20) - (X(21) if r.check else 0)

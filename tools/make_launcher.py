@@ -12,12 +12,14 @@ checked against the sha256 in PINS.
 The release folder (--out) holds:
 
     NX2navi/                      the launcher folder exactly as NX2navi-Setup.exe installs it:
-      NX2navi.exe                 launcher/native/nx2navi.c with the Triforce icon (launcher/ui/art.py)
+      NX2navi.exe                 launcher/native/nx2navi.c with the Navi icon (launcher/ui/art.py)
       python/                     python.org's embeddable Python 3.14.9, tkinter and Tcl/Tk 9.0 from its tcltk.msi,
                                   the packages of tools/requirements-launcher.txt, runtime-id.txt
       app/current.txt, app/<version>/   launcher/ (without native/), runtime/, recomp/, the tools make_game.py uses,
-                                  bin/nx2navi_xlate.exe and .id (and amd_fidelityfx_vk.dll with --ffx), toolchain.lock.json (the MSYS2 packages of today,
-                                  pinned), feed.json, VERSION, the licence files
+                                  bin/nx2navi_xlate.exe and .id (and amd_fidelityfx_vk.dll with --ffx),
+                                  lib/libnx2navirt.a (the runtime, prebuilt with the release's compiler),
+                                  toolchain.lock.json (the MSYS2 packages of today, pinned), feed.json, VERSION, the
+                                  licence files
     NX2navi-Setup-<version>.exe   launcher/native/setup.c with the folder above appended as a zip: the one file
                                   players download
     NX2navi-app-<version>.zip     app/<version> alone: what the launcher downloads to update itself
@@ -196,15 +198,44 @@ def native_compiler(lock):
             [windres, '--target=x86_64-w64-mingw32'])
 
 
+def build_runtime_lib(folder, ver, out, wine):
+    """app/<version>/lib/libnx2navirt.a: the runtime compiled once here with the release's MSYS2 clang, so players
+    compile only the few runtime files that include per-install headers (tools/make_game.py --make-runtime-lib). It
+    needs MSYS2's own clang.exe: native on Windows, through Wine with --wine elsewhere; without either players compile
+    runtime/ themselves."""
+    msys = Layout(root=MAIN_ROOT / 'toolchain' / 'launcher-msys').msys
+    app = folder / 'app' / ver
+    args = ['--make-runtime-lib', app / 'lib', '--obj', out / 'native' / 'runtime-obj', '--msys', msys]
+    if os.name == 'nt':
+        run([sys.executable, app / 'tools' / 'make_game.py', *args])
+    elif wine:
+        def win(p):
+            return 'Z:' + str(Path(p).resolve()).replace('/', '\\')
+        env = dict(os.environ, WINEDEBUG='-all', NX2NAVI_AR=win(msys / 'bin' / 'ar.exe'))
+        run(['wine', folder / 'python' / 'python.exe', win(app / 'tools' / 'make_game.py'),
+             *[win(a) if isinstance(a, Path) else a for a in args]], env=env)
+    else:
+        say('note: no prebuilt runtime (it is built on Windows, or with --wine): players compile runtime/ themselves')
+        return
+    if not (app / 'lib' / 'libnx2navirt.a').is_file():
+        sys.exit('the prebuilt runtime was not written')
+
+
 def build_native(work, cc, windres):
     from launcher.ui import art
     work.mkdir(parents=True, exist_ok=True)
-    (work / 'nx2navi.ico').write_bytes(art.triforce_ico())
+    (work / 'nx2navi.ico').write_bytes(art.navi_ico())
     shutil.copy2(ROOT / 'launcher' / 'native' / 'app.manifest', work / 'app.manifest')
-    res = work / 'res.o'
-    # windres preprocesses with the gcc it finds on PATH: the toolchain's own bin first (no MSYS2 shell sets it)
+    shutil.copy2(ROOT / 'launcher' / 'native' / 'res.rc', work / 'res.rc')
+    res = (work / 'res.o').resolve()
+    # MSYS2's GNU windres runs its preprocessor through cmd.exe and, left to find it, names the gcc beside it by full
+    # path, which cmd.exe splits at a space once the .rc's path holds one too. So gcc by bare name, found on PATH (the
+    # toolchain's own bin first; no MSYS2 shell sets it), and the .rc by its name in the work folder, where windres runs.
+    # llvm-windres (Linux) starts its preprocessor without a shell.
+    pp = [] if 'llvm' in Path(windres[0]).name else [
+        '--preprocessor=gcc', '--preprocessor-arg=-E', '--preprocessor-arg=-xc', '--preprocessor-arg=-DRC_INVOKED']
     env = dict(os.environ, PATH=str(Path(windres[0]).parent) + os.pathsep + os.environ.get('PATH', ''))
-    run([*windres, '-I', work, ROOT / 'launcher' / 'native' / 'res.rc', '-O', 'coff', '-o', res], env=env)
+    run([*windres, *pp, '-I', '.', 'res.rc', '-O', 'coff', '-o', res], env=env, cwd=work)
     flags = ['-municode', '-mwindows', '-O2', '-Wall', '-static', '-s']
     stub = work / 'NX2navi.exe'
     setup = work / 'setup-stub.exe'
@@ -255,6 +286,8 @@ def main():
     ap.add_argument('--notes', type=Path, help='release notes (markdown) for the manifest and the GitHub release')
     ap.add_argument('--lock', type=Path, help='a toolchain.lock.json to reuse instead of resolving today\'s packages')
     ap.add_argument('--version', help='the release version instead of VERSION\'s (test releases)')
+    ap.add_argument('--wine', action='store_true', help='on Linux: build the prebuilt runtime with MSYS2\'s clang '
+                                                         'through Wine')
     ap.add_argument('--publish', action='store_true', help='upload as GitHub release v<version> with gh')
     ap.add_argument('--draft', action='store_true', help='with --publish: as a draft')
     a = ap.parse_args()
@@ -267,12 +300,15 @@ def main():
     shutil.rmtree(out, ignore_errors=True)
     folder = out / 'NX2navi'
     t0 = time.time()
-    lock = json.loads(a.lock.read_text(encoding='utf-8')) if a.lock else toolchain.make_lock()
-    say(f'release {build}: toolchain lock with {len(lock["packages"])} packages')
+    lock = (json.loads(a.lock.read_text(encoding='utf-8')) if a.lock
+            else toolchain.make_lock(fast_repo=toolchain.FAST_REPO))
+    say(f'release {build}: toolchain lock with {len(lock["packages"])} packages'
+        + (f' (CLANG64 clang left out: {lock["fast_skipped"]})' if lock.get('fast_skipped') else ''))
     build_app(folder / 'app' / ver, ver, a.xlate, a.feed, lock, a.ffx)
     (folder / 'app' / 'current.txt').write_text(ver + '\n', encoding='utf-8')
     build_python(folder / 'python')
     cc, windres = native_compiler(lock)
+    build_runtime_lib(folder, ver, out, a.wine)
     stub, setup_stub = build_native(out / 'native', cc, windres)
     shutil.copy2(stub, folder / 'NX2navi.exe')
     check_folder(folder)

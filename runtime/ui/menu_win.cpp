@@ -40,8 +40,12 @@ static ImGuiKey key_of(WPARAM vk) {
     }
 }
 
+// The mouse buttons pressed on the open menu and not yet released, one bit each. While any is held the window has the
+// mouse capture, so the release reaches the menu where the pointer went outside the window (else ImGui would hold the
+// button down and miss the next click). The game itself only clips the cursor (input_win.c), it takes no capture.
+static unsigned g_held;
+
 extern "C" int menu_window_msg(HWND h, UINT m, WPARAM w, LPARAM l, LRESULT *res) {
-    (void)h;
     switch (m) {
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
@@ -71,15 +75,30 @@ extern "C" int menu_window_msg(HWND h, UINT m, WPARAM w, LPARAM l, LRESULT *res)
     case WM_LBUTTONDOWN: case WM_LBUTTONUP:
     case WM_RBUTTONDOWN: case WM_RBUTTONUP:
     case WM_MBUTTONDOWN: case WM_MBUTTONUP: {
-        if (!menu_is_open()) return 0;
         int b = m == WM_LBUTTONDOWN || m == WM_LBUTTONUP ? 0 : m == WM_RBUTTONDOWN || m == WM_RBUTTONUP ? 1 : 2;
         int down = m == WM_LBUTTONDOWN || m == WM_RBUTTONDOWN || m == WM_MBUTTONDOWN;
+        if (!down && (g_held & 1u << b)) {   // also when the menu closed meanwhile: the capture goes either way
+            g_held &= ~(1u << b);
+            if (!g_held && GetCapture() == h) ReleaseCapture();
+        }
+        if (!menu_is_open()) return 0;
+        if (down) {
+            if (!g_held) SetCapture(h);
+            g_held |= 1u << b;
+        }
         menu_event_mouse_pos((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l));
         menu_event_mouse_button(b, down);
         return 0;
     }
     case WM_MOUSEWHEEL:
         if (menu_is_open()) menu_event_wheel(0, (float)GET_WHEEL_DELTA_WPARAM(w) / WHEEL_DELTA);
+        return 0;
+    case WM_CAPTURECHANGED:   // another window took the capture (ReleaseCapture above finds g_held empty)
+        if ((HWND)l != h && g_held) {
+            for (int b = 0; b < 3; b++)
+                if (g_held & 1u << b) menu_event_mouse_button(b, 0);
+            g_held = 0;
+        }
         return 0;
     case WM_SETFOCUS:
     case WM_KILLFOCUS:

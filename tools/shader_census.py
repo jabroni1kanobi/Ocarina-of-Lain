@@ -8,7 +8,7 @@ a control section must start with CONTROL_MAGIC (sharcb_shaders says why).
 Reads build/extracted/<version>/ (RomFS image plus index.json as tools/romfs_index.py reads them, and exefs/). Writes under
 build/<version>/shaders/ only:
     code/<key>.code     translator input (graphics: SPH + instructions, compute: instructions)
-    jobs.json           key -> job, source path, origin (bnsh|sharcb|main)
+    jobs.json           key -> job, source path, origin (bnsh|sharcb|ndsr|main)
     spv/<key>.spv       with --translate
     failures.txt        with --translate, when something failed: groups by message
 
@@ -173,7 +173,7 @@ def sharcb_shaders(data, rejected):
     if not 32 <= start <= pool or pool + pool_size > len(data):
         raise ValueError('agl shader package layout outside the file')
     seen = set()
-    for size in (b'\x80\x08\x00\x00', b'\x8c\x08\x00\x00'):
+    for size in (b'\x80\x08\x00\x00', b'\x8c\x08\x00\x00', b'\xe0\x00\x00\x00'):
         at = start
         while (at := data.find(size, at, pool)) >= 0:
             record, at = at - 8, at + 4
@@ -181,6 +181,12 @@ def sharcb_shaders(data, rejected):
                 continue
             code_off = struct.unpack_from('<Q', data, record)[0]
             control_at = record + struct.unpack_from('<i', data, record + 12)[0]
+            if size[0] == NVN2_CONTROL:   # NVN2 (Switch 2) packages: the same records with a 0xe0-byte control section
+                found = nvn2_sharcb_record(data, start, pool, pool_size, code_off, control_at)
+                if found and found[0] not in seen:
+                    seen.add(found[0])
+                    yield found
+                continue
             if not start <= control_at <= pool - 0x880 or code_off >= pool_size:
                 continue
             control = data[control_at:control_at + 0x880]
@@ -196,6 +202,52 @@ def sharcb_shaders(data, rejected):
             if key not in seen:
                 seen.add(key)
                 yield key, stage, control, code
+
+
+def ndsr_shaders(data):
+    """NDSR packages (Lib/agl/agl_ndsr*.pck: compute programs). Items of 8 bytes, <u32 offset, u32 size << 4 | kind>:
+    an NVN2 control section is kind 6 with size 0xe0 and the item after it, kind 7, is its code."""
+    if data[:4] != b'NDSR':
+        raise ValueError('expected an NDSR package')
+    seen = set()
+    for at in range(4, len(data) - 16, 4):
+        off, word, code_off, code_word = struct.unpack_from('<4I', data, at)
+        if word != NVN2_CONTROL << 4 | 6 or code_word & 15 != 7 or off + NVN2_CONTROL > len(data):
+            continue
+        control = data[off:off + NVN2_CONTROL]
+        stage = NVN2_STAGES.get(struct.unpack_from('<I', control, 0x54)[0] >> 16)
+        room = code_word >> 4
+        if control[:4] != CONTROL_MAGIC or not stage or code_off + room > len(data):
+            continue
+        control += bytes(0x880 - NVN2_CONTROL)
+        size, c1_start, c1_end = struct.unpack_from('<I', control, 0x38)[0], *struct.unpack_from('<II', control, 0x40)
+        length = c1_end if c1_start >= size and c1_end >= c1_start and c1_end <= room else size
+        if not 0 < length <= room:
+            continue
+        code = data[code_off:code_off + length]
+        key = digest(control + code)
+        if key not in seen:
+            seen.add(key)
+            yield key, stage, control, code
+
+
+def nvn2_sharcb_record(data, start, pool, pool_size, code_off, control_at):
+    """(key, stage, control, code) of an NVN2 .sharcb record, as nvn2_stages cuts them, or None. A size word of 0xe0
+    is common, so a candidate counts only with the control magic and a known stage."""
+    if not start <= control_at <= pool - NVN2_CONTROL or code_off >= pool_size:
+        return None
+    control = data[control_at:control_at + NVN2_CONTROL]
+    stage = NVN2_STAGES.get(struct.unpack_from('<I', control, 0x54)[0] >> 16)
+    if control[:4] != CONTROL_MAGIC or not stage:
+        return None
+    control += bytes(0x880 - NVN2_CONTROL)
+    size, c1_start, c1_end = struct.unpack_from('<I', control, 0x38)[0], *struct.unpack_from('<II', control, 0x40)
+    room = pool_size - code_off
+    length = c1_end if c1_start >= size and c1_end >= c1_start and c1_end <= room else size
+    if not 0 < length <= room:
+        return None
+    code = data[pool + code_off:pool + code_off + length]
+    return digest(control + code), stage, control, code
 
 
 def nso_image(path):
@@ -222,7 +274,8 @@ def startup_package(name):
 # The RomFS directories that can hold shaders: the agl and gsys packages, the effects, terrain, the UI layout archives
 # and the game's own shader packs. Every shader of 1.1.0 (27,576) comes from these six; they are 1,996 entries and
 # 147 MiB, 0.9% of a RomFS whose every file the walk below used to read and decompress first (65 s against 2.8 s).
-SHADER_DIRS = ('Shader/', 'Effect/', 'Lib/agl/', 'Lib/Terrain/', 'Lib/gsys/', 'UI/LayoutArchive/')
+# Ocarina keeps its UI layout shaders (MergeShader) in Layout2Shader/.
+SHADER_DIRS = ('Shader/', 'Effect/', 'Lib/agl/', 'Lib/Terrain/', 'Lib/gsys/', 'UI/LayoutArchive/', 'Layout2Shader/')
 
 
 def inventory(romfs, exefs, everything=True):
@@ -268,6 +321,9 @@ def inventory(romfs, exefs, everything=True):
             if data[:4] == b'BAHS':
                 add('sharcb', name, sharcb_shaders(data, rejected), True)
                 return
+            if data[:4] == b'NDSR':
+                add('ndsr', name, ndsr_shaders(data), True)
+                return
             if data[:4] == b'SARC':
                 if depth > 4:
                     return
@@ -284,7 +340,7 @@ def inventory(romfs, exefs, everything=True):
             if not everything and not name.startswith(SHADER_DIRS):
                 continue
             raw = read(name)
-            if raw[:4] not in (ZSTD, b'SARC', b'FSHA', b'BNSH', b'BAHS') and b'BNSH\0\0\0\0' not in raw:
+            if raw[:4] not in (ZSTD, b'SARC', b'FSHA', b'BNSH', b'BAHS', b'NDSR') and b'BNSH\0\0\0\0' not in raw:
                 continue
             visit('bnsh', name, decode(raw) if raw[:4] == ZSTD else raw, startup_package(name))
     for module in sorted(exefs.iterdir()):
@@ -387,10 +443,10 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     shaders, rejected = inventory(extracted / 'romfs', extracted / 'exefs')
     jobs = write_shaders(shaders, out, args.all)
-    a, b, c = (sum(1 for j in jobs.values() if j['origin'] == o) for o in ('bnsh', 'sharcb', 'main'))
+    a, b, n, c = (sum(1 for j in jobs.values() if j['origin'] == o) for o in ('bnsh', 'sharcb', 'ndsr', 'main'))
     print(f'{len(shaders)} unique shaders found in all, {len(jobs)} selected; {rejected} .sharcb record candidates '
           f'without a control section rejected', flush=True)
-    summary = f'shaders {len(jobs)} (bnsh {a}, sharcb {b}, main {c})'
+    summary = f'shaders {len(jobs)} (bnsh {a}, sharcb {b}, ndsr {n}, main {c})'
     print(f'extracted {summary} in {time.monotonic() - t0:.1f} s', flush=True)
     if not args.translate:
         print(f'{summary}, total {time.monotonic() - t0:.1f} s')

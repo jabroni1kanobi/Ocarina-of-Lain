@@ -7,6 +7,7 @@ int vk_fg_wanted(void);                      // NX2NAVI_FRAMEGEN = fsr3 with DLS
 uint32_t vk_fg_queue_count(void);            // graphics-family queues the device creates: 3 with frame generation, else 1
 void vk_fg_queues(VkQueue present, VkQueue acquire);   // vk_device.c, after the device exists
 int vk_fg_active(void);                      // the frame generation swapchain exists
+int vk_fg_generating(void);                  // ... and the last frame had generation on (not paused for the menu)
 // gfx_present.c's swapchain calls while vk_fg_wanted: the first create makes AMD's swapchain context, later ones
 // (window resizes) its swapchain again. Non-success from the first: the plain swapchain path stays.
 VkResult vk_fg_create_swapchain(const VkSwapchainCreateInfoKHR *ci, VkSwapchainKHR *sc);

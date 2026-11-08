@@ -105,7 +105,9 @@ static double dlss_share(const char *m) {
     if (!cfg_bool("NX2NAVI_DLAA")) return 0;
     for (int i = 0; i < (int)(sizeof dlss / sizeof dlss[0]); i++)
         if (!strcmp(m, dlss[i].name)) {
-            if (dll < 0 && !(dll = dlss_dll())) {
+            // Ocarina's builds have no scene patch set: its DLSS render scale is widescreen.c's (dlss_share there),
+            // and the driver's NGX supplies the model where the file is missing, so there is nothing to report
+            if (dll < 0 && !(dll = dlss_dll()) && res_adjustable()) {
 #ifdef _WIN32
                 rt_log("resolution: DLSS %s needs nvngx_dlss.dll next to nx2navi.exe, which is missing: the scene follows "
                        "render_scale", m);

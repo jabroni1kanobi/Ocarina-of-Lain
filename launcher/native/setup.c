@@ -32,6 +32,16 @@ typedef struct {
 static Setup S;
 static HWND g_wnd;
 
+/* Navi as launcher/ui/art.py NAVI draws it: W white, g grey, K black, B and L blue, '.' transparent. */
+static const char *const NAVI[21] = {
+    "WWWW..............WWWW", "WggWW............WWggW", "WgggWW..........WWgggW", "WgWggWW........WWggWgW",
+    "WggWggW........WggWggW", "WgWgWgWW......WWgWgWgW", "WggggWgWKKKKKKWgWggggW", "WWggWggKBBBBBBKggWggWW",
+    ".WggggKKBBLLBBKKggggW.", ".WWggKKBBLLLLBBKKggWW.", "..WWgKBBLLWWLLBBKgWW..", "...WWKBBLWWWWLBBKWW...",
+    ".....KBBLLWWLLBBK.....", ".....KBBBLLLLBBBK.....", ".....WKKBBBBBBKKW.....", "....WWgKKBBBBKKgWW....",
+    "...WWgggKKKKKKgggWW...", "...WggWgW....WgWggW...", "...WgWggW....WggWgW...", "...WWggWW....WWggWW...",
+    "....WWWW......WWWW....",
+};
+
 static void fail_msg(const wchar_t *fmt, const wchar_t *arg)
 {
     swprintf(S.error, 512, fmt, arg ? arg : L"");
@@ -258,35 +268,37 @@ static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp)
         FillRect(dc, &r, edge);
         RECT in = {r.left + 2, r.top + 2, r.right - 2, r.bottom - 2};
         FillRect(dc, &in, bg);
-        /* the Triforce: three gold triangles */
-        HBRUSH gold = CreateSolidBrush(RGB(0xe8, 0xaf, 0x3d));
-        HPEN none = CreatePen(PS_NULL, 0, 0);
-        HGDIOBJ ob = SelectObject(dc, gold), op = SelectObject(dc, none);
-        int cx = 52, top = 28, s = 44;
-        POINT t1[3] = {{cx, top}, {cx + s / 4, top + s * 433 / 1000}, {cx - s / 4, top + s * 433 / 1000}};
-        POINT t2[3] = {{cx - s / 4, top + s * 433 / 1000 + 1}, {cx, top + s * 866 / 1000}, {cx - s / 2, top + s * 866 / 1000}};
-        POINT t3[3] = {{cx + s / 4, top + s * 433 / 1000 + 1}, {cx + s / 2, top + s * 866 / 1000}, {cx, top + s * 866 / 1000}};
-        Polygon(dc, t1, 3);
-        Polygon(dc, t2, 3);
-        Polygon(dc, t3, 3);
-        SelectObject(dc, ob);
-        SelectObject(dc, op);
+        /* Navi, the launcher's emblem: the artwork's 22 x 21 pixels, 4 x 4 screen pixels each */
+        for (int y = 0; y < 21; y++)
+            for (int x = 0; x < 22; x++) {
+                COLORREF col;
+                switch (NAVI[y][x]) {
+                case 'W': col = RGB(255, 255, 255); break;
+                case 'g': col = RGB(207, 216, 220); break;
+                case 'K': col = RGB(0, 0, 0); break;
+                case 'B': col = RGB(2, 136, 209); break;
+                case 'L': col = RGB(79, 195, 247); break;
+                default: continue;
+                }
+                HBRUSH b = CreateSolidBrush(col);
+                RECT px = {16 + 4 * x, 18 + 4 * y, 20 + 4 * x, 22 + 4 * y};
+                FillRect(dc, &px, b);
+                DeleteObject(b);
+            }
         HFONT big = CreateFontW(-26, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
         HFONT small = CreateFontW(-16, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, RGB(0xf3, 0xec, 0xdc));
         HGDIOBJ of = SelectObject(dc, big);
-        TextOutW(dc, 96, 30, APP_NAME, (int)wcslen(APP_NAME));
+        TextOutW(dc, 120, 30, APP_NAME, (int)wcslen(APP_NAME));
         SelectObject(dc, small);
         SetTextColor(dc, RGB(0xe9, 0xdc, 0xc0));
         wchar_t line[96];
         swprintf(line, 96, L"Installing version %ls\x2026  %llu MB", S.version, (unsigned long long)(S.written >> 20));
-        TextOutW(dc, 96, 66, line, (int)wcslen(line));
+        TextOutW(dc, 120, 66, line, (int)wcslen(line));
         SelectObject(dc, of);
         DeleteObject(big);
         DeleteObject(small);
-        DeleteObject(gold);
-        DeleteObject(none);
         DeleteObject(bg);
         DeleteObject(edge);
         EndPaint(w, &ps);

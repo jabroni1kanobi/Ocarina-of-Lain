@@ -50,6 +50,9 @@ typedef struct { const char *key, *def, *values; int live; } CfgMeta;
 const CfgMeta *cfg_meta(const char *key);
 // The i-th row (0-based, table order); NULL past the last.
 const CfgMeta *cfg_meta_at(int i);
+// What key reads when the player has not set it: the device profile's value (the Steam Deck's), else the row's default;
+// NULL for a key without a row. The menu's "default" mark follows it.
+const char *cfg_default(const char *key);
 
 // The setting's value for consumers: the environment or nx2navi.ini value, else the CfgMeta default. name has the NX2NAVI_
 // prefix, like cfg_get; a name without a row is a bug (rt_fatal). A row with an empty default has no fixed value: its

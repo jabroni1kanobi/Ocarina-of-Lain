@@ -45,7 +45,13 @@ site wide_scene main 31f3a04 f2c08708 f9403508  # movk x8, #0x438, lsl #32 -> ld
 # scale of 1.0 (main+0x806420). res_fixed always takes the fixed path and reads its scale from +240 (a float, written by
 # runtime/widescreen.c from the DLSS mode). It is switched on only once the controller has run for a while, as its
 # fields would otherwise stay unset and the scene stay black.
+# The controller returns its scale with a state in bits 32..39. Its caller (main+0x31d3ee0) makes a new scene scale
+# from the returned one only on state 0 ("changed": the bit 3 request of renderer +0xe2c, consumed at main+0x31d40b4);
+# the fixed path returns 1 or 2, so the page's scale reached the scene only by chance and a scene reload put it back at
+# full size. The fixed path returns state 0 instead: the caller applies the page's scale every frame, so a mode
+# picked in the menu takes effect at once and survives a reload.
 site res_fixed main 805bd0 360041e8 1400020f            # tbz w8, #0, #0x80640c -> b #0x80640c
+site res_fixed main 80641c 9a888128 aa1f03e8            # csel x8, x9, x8, hi -> mov x8, xzr (state 0)
 site res_fixed main 806420 52a7f009 @page:x9 b940f129   # mov w9, #0x3f800000 -> adrp x9, page; ldr w9, [x9, #240]
 
 # Camera aspect ratio: the camera update (main+0x4c48c0, the same code as the camera update site in

@@ -12,20 +12,18 @@
 #include "imgui.h"
 #include "imgui_internal.h"   // SetKeyOwner, SetFocusID, NavCursorVisible
 
+#include "ui/menu_skin.h"
 #include "ui/option_rows.h"
 
 extern "C" {
 #include "cfg.h"
 #include "platform/platform.h"
 #include "ui_text.h"
-#include "ui/menu_art.h"
 #include "menu_sound.h"
 // host.h pulls in cpu.h, which is C only: the one function needed from it, as declared there.
 void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 }
 
-static const ImU32 kGold = IM_COL32(236, 194, 84, 255);
-static const ImU32 kDim = IM_COL32(150, 150, 140, 255);
 static const ImU32 kGrey = IM_COL32(110, 110, 102, 255);
 
 static float g_scale = 1;
@@ -36,9 +34,18 @@ static float g_bottom;                   // opt_reserve_bottom: kept free under 
 static bool g_disable_next;              // opt_disable_next: the next row is greyed out with g_disable_note
 static const char *g_disable_note;
 
-// The description pane: this frame's hovered and selected rows, the page's first row, and the last one shown.
+// The rows' cursor, drawn once all rows are (opt_end), its glow in the layer under the rows and its frame in the one
+// over them: the selected row's box, else the hovered one's (alpha: fainter for a hovered row, and for one the
+// environment fixes).
+static struct { bool on; ImVec2 a, b; float alpha; } g_cursor;
+// Room left on each side of a row for its cursor, which is drawn outside the row's box.
+static float row_margin(void) { return ceilf(skin_cursor_reach(g_scale) * 0.85f); }
+
+// The description pane: this frame's hovered and selected rows, the page's first row, and the last one shown (of the
+// page g_page: another page starts from its first row's, however it was opened).
 struct Desc { char text[UI_DESC_BYTES]; };
 static Desc g_hover, g_focus, g_first, g_shown;
+static ImGuiID g_page;
 
 // disabled: the note of a row opt_disable_next greyed out, else NULL.
 static void desc_set(Desc &d, const char *desc, const char *key, const CfgMeta *m, const char *disabled) {
@@ -72,14 +79,30 @@ void opt_begin(const char *id, float scale) {
     g_focus_req = false;
     if (g_take_first) ImGui::NavMoveRequestCancel();   // this frame's move goes to the first row instead
     g_hover.text[0] = g_focus.text[0] = g_first.text[0] = 0;
+    if (ImGuiID page = ImGui::GetID(id); page != g_page) g_page = page, g_shown.text[0] = 0;
     ImVec2 avail = ImGui::GetContentRegionAvail();
     avail.y -= g_bottom;
     ImGui::PushID(id);
     ImGui::BeginChild("##rows", ImVec2(avail.x * 0.58f, avail.y), ImGuiChildFlags_NavFlattened);
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 5 * scale));
+    // the rows sit far enough apart that the selected row's cursor frame clears its neighbours' boxes
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 9 * scale));
+    ImGui::Dummy(ImVec2(0, row_margin()));   // and the first row's cursor stays inside the pane
+    g_cursor.on = false;
+    // three layers: the cursor's glow under the rows, the rows, the cursor's frame over them (opt_end draws the cursor)
+    ImGui::GetWindowDrawList()->ChannelsSplit(3);
+    ImGui::GetWindowDrawList()->ChannelsSetCurrent(1);
 }
 
 void opt_end(void) {
+    ImGui::Dummy(ImVec2(0, row_margin()));   // the last row's cursor stays inside the pane
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    if (g_cursor.on) {
+        dl->ChannelsSetCurrent(0);
+        skin_cursor_glow(dl, g_cursor.a, g_cursor.b, g_scale, g_cursor.alpha);
+        dl->ChannelsSetCurrent(2);
+        skin_cursor_frame(dl, g_cursor.a, g_cursor.b, g_scale, g_cursor.alpha);
+    }
+    dl->ChannelsMerge();
     ImGui::PopStyleVar();
     ImGui::EndChild();
     // the hovered row (mouse) wins, else the selected one (controller), else the last shown, else the first row
@@ -90,10 +113,10 @@ void opt_end(void) {
     ImVec2 p = ImGui::GetCursorScreenPos(), avail = ImGui::GetContentRegionAvail();
     avail.y -= g_bottom;
     float gap = 24 * g_scale;
-    ImGui::GetWindowDrawList()->AddLine(ImVec2(p.x + gap * 0.5f, p.y), ImVec2(p.x + gap * 0.5f, p.y + avail.y),
-                                        IM_COL32(236, 194, 84, 110), 1.0f);
+    // the description on a dark panel framed like the rows' buttons
+    skin_panel(ImGui::GetWindowDrawList(), ImVec2(p.x + gap * 0.5f, p.y), ImVec2(p.x + avail.x, p.y + avail.y), g_scale);
     ImGui::SetCursorScreenPos(ImVec2(p.x + gap, p.y));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14 * g_scale, 6 * g_scale));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22 * g_scale, 20 * g_scale));
     ImGui::BeginChild("##desc", ImVec2(0, avail.y), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoNav);
     ImGui::PopStyleVar();
     ImGui::PushTextWrapPos(0);
@@ -120,10 +143,15 @@ static int row_text(const char *key, const char *label, const char *desc, const 
     g_disable_next = false;
     bool off = disabled || cfg_from_env(key) != 0;
     ImGui::PushID(key);
+    // the row's box, inset from the pane's sides by the room its cursor needs
+    const float margin = row_margin();
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + margin);
     ImVec2 p = ImGui::GetCursorScreenPos();
     // h whole pixels: ImGui truncates cursor positions, which rounds a fractional height the other way above the window's
     // top (negative y), so the page grew a pixel per row scrolled out and a row scrolled to the bottom was cut off
-    float fs = ImGui::GetFontSize(), w = ImGui::GetContentRegionAvail().x, h = floorf(fs * 2.2f);
+    // at least a pixel wide: InvisibleButton asserts on a zero size (a narrow window), and ImGui reads a negative one as
+    // "up to that far before the right edge", away from the box drawn
+    float fs = ImGui::GetFontSize(), w = fmaxf(ImGui::GetContentRegionAvail().x - margin, 1.0f), h = floorf(fs * 2.2f);
     ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));   // the row's own border shows the selection
     bool clicked = ImGui::InvisibleButton("##row", ImVec2(w, h), ImGuiButtonFlags_EnableNav);
     ImGui::PopStyleColor();
@@ -138,6 +166,8 @@ static int row_text(const char *key, const char *label, const char *desc, const 
     }
     bool hov = ImGui::IsItemHovered(), foc = ImGui::IsItemFocused() && ImGui::GetCurrentContext()->NavCursorVisible;
     int step = clicked && !off ? 2 : 0;
+    // a click of the mouse, not A / Enter / Space: only a click picks an arrow by where the pointer is
+    const bool by_mouse = clicked && hov && ImGui::IsMouseReleased(ImGuiMouseButton_Left);
     g_held = false;
     if (foc && !off) {
         // the left stick arrives as the D-pad (menu.cpp pad_events)
@@ -164,32 +194,31 @@ static int row_text(const char *key, const char *label, const char *desc, const 
 
     ImDrawList *dl = ImGui::GetWindowDrawList();
     ImFont *font = ImGui::GetFont();
-    float r = 9 * g_scale, pad = 16 * g_scale, small = fs * 0.72f;
-    dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), hov || foc ? IM_COL32(255, 230, 170, 18) : IM_COL32(0, 0, 0, 46), r);
-    // the selected row in the game's own cursor (glow, then its line; ui/menu_art.cpp), else a gold border
-    bool art = false;
-    if (hov || foc) {   // a halo around the row (the glow's middle left out, so the label stays readable), then the line
-        float gx = h * 0.22f, gy = h * 0.16f;
-        art = menu_art_draw9(dl, MENU_ART_CURSOR_GLOW, ImVec2(p.x - gx, p.y - gy), ImVec2(p.x + w + gx, p.y + h + gy), h * 0.5f, 0.3f,
-                             off ? IM_COL32(236, 194, 84, 50) : IM_COL32(244, 200, 96, 120), 0) &&
-              menu_art_draw9(dl, MENU_ART_CURSOR_LINE, ImVec2(p.x - gx * 0.3f, p.y - gy * 0.3f),
-                             ImVec2(p.x + w + gx * 0.3f, p.y + h + gy * 0.3f), h * 0.12f, 0.1f,
-                             off ? IM_COL32(255, 236, 190, 80) : IM_COL32(255, 236, 180, 150), 0);   // edges only: the art is a filled bar
+    float pad = 20 * g_scale, small = fs * 0.72f;
+    // the save menu's brown button, brighter while selected or hovered; the white cursor goes round it in opt_end
+    skin_button(dl, p, ImVec2(p.x + w, p.y + h), g_scale, foc ? 1.0f : hov ? 0.6f : 0.0f, off);
+    if (foc || (hov && !g_cursor.on)) {
+        g_cursor.on = true, g_cursor.a = p, g_cursor.b = ImVec2(p.x + w, p.y + h);
+        g_cursor.alpha = (foc ? 1.0f : 0.55f) * (off ? 0.5f : 1.0f);
     }
-    if (!art)
-        dl->AddRect(p, ImVec2(p.x + w, p.y + h),
-                    hov || foc ? (off ? IM_COL32(236, 194, 84, 120) : kGold) : IM_COL32(255, 236, 200, off ? 16 : 34), r, 0,
-                    hov || foc ? 2.0f : 1.0f);
     float ty = p.y + fs * 0.25f, ny = p.y + fs * 1.3f;   // the label line and the note line under it
     float right = p.x + w - pad;                         // the value's right edge
     float value_left = right;
+    // The value and its note take at most 60 % of the row: a longer value (a graphics card's full name) is drawn smaller,
+    // down to 75 % of the font size, then clipped, so the label keeps room and nothing reaches past the box.
+    const float cap = fmaxf((w - pad * 2) * 0.6f, 0.0f);
+    float vfs = fs, tv = v.value[0] ? font->CalcTextSizeA(fs, FLT_MAX, 0, v.value).x : 0;
+    if (tv > cap) {
+        vfs = fmaxf(fs * cap / tv, fs * 0.75f);
+        tv = fminf(font->CalcTextSizeA(vfs, FLT_MAX, 0, v.value).x, cap);
+    }
     if (v.arrows && v.value[0]) {   // < value >, drawn (the font has no arrow glyphs); a click on one steps
         float aw = fs * 0.42f, gap = fs * 0.55f, cy = ty + fs * 0.52f;
-        float rx = right - aw, lx = rx - gap - ImGui::CalcTextSize(v.value).x - gap - aw;
-        ImU32 ac = off ? kGrey : hov || foc ? kGold : IM_COL32(170, 170, 160, 255);
+        float rx = right - aw, lx = rx - gap - tv - gap - aw;
+        ImU32 ac = off ? kGrey : hov || foc ? SKIN_TEXT : SKIN_TEXT_DIM;
         dl->AddTriangleFilled(ImVec2(lx, cy), ImVec2(lx + aw, cy - aw * 0.75f), ImVec2(lx + aw, cy + aw * 0.75f), ac);
         dl->AddTriangleFilled(ImVec2(rx + aw, cy), ImVec2(rx, cy - aw * 0.75f), ImVec2(rx, cy + aw * 0.75f), ac);
-        if (clicked && !off) {
+        if (by_mouse && !off) {
             float mx = ImGui::GetIO().MousePos.x;
             if (mx >= lx - gap && mx <= lx + aw + gap) step = -1;
             else if (mx >= rx - gap && mx <= rx + aw + gap) step = 1;
@@ -200,36 +229,45 @@ static int row_text(const char *key, const char *label, const char *desc, const 
     if (movable) {   // up and down arrows left of the value; a click on one moves the row
         // a fixed value column (On / Off differ in width) keeps the arrows of the rows in one line
         float aw = fs * 0.42f, gap = fs * 0.55f;
-        float cx = right - fmaxf(ImGui::CalcTextSize(v.value).x, fs * 2.8f) - gap * 2 - aw;
+        float cx = right - fmaxf(tv, fs * 2.8f) - gap * 2 - aw;
         float uy = ty + fs * 0.12f, dy = ty + fs * 0.92f;
-        ImU32 ac = off ? kGrey : hov || foc ? kGold : IM_COL32(170, 170, 160, 255);
+        ImU32 ac = off ? kGrey : hov || foc ? SKIN_TEXT : SKIN_TEXT_DIM;
         dl->AddTriangleFilled(ImVec2(cx, uy + aw * 0.7f), ImVec2(cx + aw, uy + aw * 0.7f), ImVec2(cx + aw * 0.5f, uy), ac);
         dl->AddTriangleFilled(ImVec2(cx, dy - aw * 0.7f), ImVec2(cx + aw, dy - aw * 0.7f), ImVec2(cx + aw * 0.5f, dy), ac);
-        if (clicked && !off) {
+        if (by_mouse && !off) {
             ImVec2 mp = ImGui::GetIO().MousePos;
             if (mp.x >= cx - gap * 0.5f && mp.x <= cx + aw + gap * 0.5f) step = mp.y < ty + fs * 0.52f ? 3 : 4;
         }
         value_left = cx - gap;
     }
     if (v.value[0]) {
-        float vx = right - ImGui::CalcTextSize(v.value).x;
-        dl->AddText(ImVec2(vx, ty), off ? kGrey : v.is_default ? IM_COL32(205, 205, 195, 255) : IM_COL32(255, 255, 255, 255),
-                    v.value);
+        float vx = right - tv;
+        ImVec4 vclip(vx, p.y, right, p.y + h);
+        dl->AddText(font, vfs, ImVec2(vx, ty + (fs - vfs) * 0.5f),
+                    off ? kGrey : v.is_default ? IM_COL32(232, 222, 198, 255) : IM_COL32(255, 255, 255, 255), v.value, NULL,
+                    0, &vclip);
         if (!v.arrows && !movable) value_left = vx;
     }
-    if (v.note || v.is_default) {   // under the value, right-aligned with it
+    float note_right = p.x + w - pad;   // where the label's own note stops: short of the value's note, when there is one
+    if (v.note || v.is_default) {   // under the value, right-aligned with it; its start shows when it is too long
         const char *t = v.note ? v.note : menu_text(UI_MENU_DEFAULT_MARK);
-        float tw = font->CalcTextSizeA(small, FLT_MAX, 0, t).x;
-        dl->AddText(font, small, ImVec2(right - tw, ny), v.note ? IM_COL32(220, 170, 100, 255) : kDim, t);
+        float tw = fminf(font->CalcTextSizeA(small, FLT_MAX, 0, t).x, cap);
+        ImVec4 nclip(right - tw, p.y, right, p.y + h);
+        dl->AddText(font, small, ImVec2(right - tw, ny), v.note ? IM_COL32(250, 206, 130, 255) : SKIN_TEXT_DIM, t, NULL, 0,
+                    &nclip);
+        if (tw > 0) note_right = right - tw - fs * 0.6f;
     }
     // the label and its note, clipped before the value
     ImVec4 clip(p.x, p.y, value_left - fs * 0.6f, p.y + h);
-    dl->AddText(font, fs, ImVec2(p.x + pad, ty), off ? kGrey : IM_COL32(240, 236, 224, 255), label, NULL, 0, &clip);
+    dl->AddText(font, fs, ImVec2(p.x + pad, ty), off ? kGrey : SKIN_TEXT, label, NULL, 0, &clip);
     const char *note = disabled        ? disabled
                      : off             ? menu_text(UI_MENU_SET_BY_ENV)
                      : m && !m->live ? menu_text(UI_MENU_AFTER_RESTART)
                                      : NULL;
-    if (note) dl->AddText(font, small, ImVec2(p.x + pad, ny), off ? IM_COL32(200, 150, 90, 255) : kDim, note);
+    ImVec4 note_clip(p.x, p.y, note_right, p.y + h);
+    if (note)
+        dl->AddText(font, small, ImVec2(p.x + pad, ny), off ? IM_COL32(200, 150, 90, 255) : SKIN_TEXT_DIM, note, NULL, 0,
+                    &note_clip);
     ImGui::PopID();
     return off ? 0 : step;
 }
@@ -274,12 +312,23 @@ int opt_save_tick(int force) {
 // ---- rows
 
 bool opt_toggle(const char *key, UiTextId label, UiTextId desc, bool inverted) {
-    const CfgMeta *m = cfg_meta(key);
-    bool set = cfg_bool(key) != 0, def = m && strcmp(m->def, "0") != 0;
+    const char *d = cfg_default(key);
+    bool set = cfg_bool(key) != 0, def = d && *d && strcmp(d, "0") != 0;
     bool on = set != inverted;   // what the row shows
     RowView v = {menu_text(on ? UI_MENU_ON : UI_MENU_OFF), set == def, false, NULL};
     if (!row(key, label, desc, v)) return false;   // any step flips it
     apply(key, set ? "0" : "1");
+    return true;
+}
+
+bool opt_toggle_value(const char *key, UiTextId label, UiTextId desc, const char *on_value, const char *off_value, const char *note) {
+    // the default as the player's profile has it (cfg_default: the Steam Deck's fifo), which is also what "on" writes
+    // when it is an on value, so turning the switch off and on again puts the profile's own value back
+    const char *d = cfg_default(key);
+    bool on = strcmp(cfg_value(key), off_value) != 0, def = d && strcmp(d, off_value) != 0;
+    RowView v = {menu_text(on ? UI_MENU_ON : UI_MENU_OFF), on == def, false, note};
+    if (!row(key, label, desc, v)) return false;   // any step flips it
+    apply(key, on ? off_value : def && *d ? d : on_value);
     return true;
 }
 
@@ -294,47 +343,59 @@ bool opt_toggle_text(const char *id, const char *label, const char *desc, bool o
     return row_text(id, label, desc, v, false) != 0;   // any step flips it
 }
 
-void opt_group_text(const char *title) {
-    ImGui::Dummy(ImVec2(0, 6 * g_scale));
-    ImGui::PushTextWrapPos(0);
-    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", title);
-    ImGui::PopTextWrapPos();
+// A group heading: the game's divider ornament across the pane, then the title in the accent colour.
+static void group_divider(void) {
+    float fh = skin_filigree_height(g_scale);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float m = row_margin();
+    skin_filigree(ImGui::GetWindowDrawList(), p.x + m, p.x + ImGui::GetContentRegionAvail().x - m, p.y + fh * 0.5f, g_scale);
+    ImGui::Dummy(ImVec2(0, fh));
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + m);
 }
 
-void opt_text_str(const char *text, bool warn) {
-    ImGui::PushTextWrapPos(0);
-    if (warn) ImGui::TextColored(ImVec4(0.95f, 0.66f, 0.40f, 1), "%s", text);
+// Text across the rows' column, inset from its sides as the rows' boxes are and wrapped before their right edge. The
+// cursor already stands at the inset when indented is true (after group_divider).
+static void column_text(const char *text, const ImVec4 *col, bool indented) {
+    const float m = row_margin();
+    if (!indented) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + m);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + fmaxf(ImGui::GetContentRegionAvail().x - m, 1.0f));
+    if (col) ImGui::TextColored(*col, "%s", text);
     else ImGui::TextUnformatted(text);
     ImGui::PopTextWrapPos();
 }
 
-void opt_group(UiTextId title) {
-    ImGui::Dummy(ImVec2(0, 6 * g_scale));
-    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", menu_text(title));
+static const ImVec4 kWarn(0.95f, 0.66f, 0.40f, 1);
+
+void opt_group_text(const char *title) {
+    group_divider();
+    const ImVec4 gold = ImGui::ColorConvertU32ToFloat4(SKIN_GOLD);
+    column_text(title, &gold, true);
 }
 
-void opt_text(UiTextId text, bool warn) {
-    ImGui::PushTextWrapPos(0);
-    if (warn) ImGui::TextColored(ImVec4(0.95f, 0.66f, 0.40f, 1), "%s", menu_text(text));
-    else ImGui::TextUnformatted(menu_text(text));
-    ImGui::PopTextWrapPos();
+void opt_text_str(const char *text, bool warn) { column_text(text, warn ? &kWarn : nullptr, false); }
+
+void opt_group(UiTextId title) {
+    group_divider();
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(SKIN_GOLD), "%s", menu_text(title));
 }
+
+void opt_text(UiTextId text, bool warn) { column_text(menu_text(text), warn ? &kWarn : nullptr, false); }
 
 bool opt_choice_list(const char *key, UiTextId label, const char *const *values, const char *const *names, int n,
                      UiTextId desc, int cur, const char *note) {
-    const CfgMeta *m = cfg_meta(key);
+    const char *d = cfg_default(key);
     const char *now = cfg_value(key);
     if (cur < 0)
         for (int i = 0; i < n; i++)
             if (!strcmp(values[i], now)) cur = i;
     int def = -1;
-    for (int i = 0; m && i < n; i++)
-        if (!strcmp(values[i], m->def)) def = i;
+    for (int i = 0; d && i < n; i++)
+        if (!strcmp(values[i], d)) def = i;
     RowView v = {cur >= 0 ? names[cur] : now, cur == def, true, note};
     int step = row(key, label, desc, v);
     if (!step || n <= 0) return false;
     int nv;
-    if (cur < 0) nv = 0;
+    if (cur < 0) nv = step < 0 ? n - 1 : 0;   // a value not in the list: left from the end, right / A from the start
     else if (step == 2) nv = (cur + 1) % n;               // A / click: the next value, round to the first
     else nv = cur + step < 0 ? 0 : cur + step >= n ? n - 1 : cur + step;   // left / right stop at the ends
     if (nv == cur) return false;
@@ -347,7 +408,7 @@ int opt_choice_index(const char *key, UiTextId label, const char *const *names, 
     RowView v = {cur >= 0 && cur < n ? names[cur] : "", cur == def, true, note};
     int step = row(key, label, desc, v);
     if (!step || n <= 0) return -1;
-    int nv = cur < 0 ? 0 : step == 2 ? (cur + 1) % n : cur + step < 0 ? 0 : cur + step >= n ? n - 1 : cur + step;
+    int nv = cur < 0 ? (step < 0 ? n - 1 : 0) : step == 2 ? (cur + 1) % n : cur + step < 0 ? 0 : cur + step >= n ? n - 1 : cur + step;
     if (nv == cur) return -1;
     menu_sound_play(MENU_SOUND_CURSOR);
     return nv;
@@ -386,11 +447,11 @@ bool opt_slider(const char *key, UiTextId label, float lo, float hi, UiTextId de
                 const char *note, const char *fallback) {
     const char *set = cfg_get(key);
     const char *src = fallback && !(set && *set) ? fallback : key;   // unset: show the value in effect, the fallback's
-    const CfgMeta *m = cfg_meta(src);
-    // A key without a table default of its own (the per-stick dead zones) defaults to its fallback: the "default" mark
+    const char *d = cfg_default(src);
+    // A key without a default of its own (the per-stick dead zones) defaults to its fallback: the "default" mark
     // follows the fallback's default, not 0, even once the key is set.
-    if (fallback && m && !m->def[0]) m = cfg_meta(fallback);
-    double v = cfg_double(src), def = m && m->def[0] ? strtod(m->def, NULL) : lo;
+    if (fallback && !(d && *d)) d = cfg_default(fallback);
+    double v = cfg_double(src), def = d && *d ? strtod(d, NULL) : lo;
     char shown[48];
     snprintf(shown, sizeof shown, fmt, v);
     RowView rv = {shown, fabs(v - def) < step * 0.01, true, note};
@@ -428,20 +489,22 @@ static void fit_text(ImDrawList *dl, float x0, float x1, float y, float h, ImU32
 // The label column and the three cells of a binding row of width w.
 static void bind_columns(float x, float w, float cx[3], float *cw) {
     float lw = floorf(w * 0.34f), gap = floorf(8 * g_scale);
-    *cw = floorf((w - lw - gap * 3) / 3);
+    *cw = fmaxf(floorf((w - lw - gap * 3) / 3), 1.0f);   // a pixel at least: InvisibleButton asserts on a zero width
     for (int c = 0; c < 3; c++) cx[c] = x + lw + gap + c * (*cw + gap);
 }
 
 void opt_bind_header(UiTextId c0, UiTextId c1, UiTextId c2) {
+    // over the cells of the binding rows: the same inset (opt_bind_row) and the same columns
+    const float margin = row_margin();
     ImVec2 p = ImGui::GetCursorScreenPos();
-    float w = ImGui::GetContentRegionAvail().x, cx[3], cw, fs = ImGui::GetFontSize() * 0.8f;
-    bind_columns(p.x, w, cx, &cw);
+    float w = fmaxf(ImGui::GetContentRegionAvail().x - margin * 2, 1.0f), cx[3], cw, fs = ImGui::GetFontSize() * 0.8f;
+    bind_columns(p.x + margin, w, cx, &cw);
     const UiTextId cols[3] = {c0, c1, c2};
     ImFont *font = ImGui::GetFont();
     for (int c = 0; c < 3; c++) {
         const char *t = menu_text(cols[c]);
         float tw = font->CalcTextSizeA(fs, FLT_MAX, 0, t).x;
-        ImGui::GetWindowDrawList()->AddText(font, fs, ImVec2(cx[c] + (cw - tw) * 0.5f, p.y), kDim, t);
+        ImGui::GetWindowDrawList()->AddText(font, fs, ImVec2(cx[c] + (cw - tw) * 0.5f, p.y), SKIN_TEXT_DIM, t);
     }
     ImGui::Dummy(ImVec2(w, fs * 1.2f));
 }
@@ -449,11 +512,13 @@ void opt_bind_header(UiTextId c0, UiTextId c1, UiTextId c2) {
 int opt_bind_row(const char *key, const char *label, UiTextId desc, const char *const cells[3], const bool enabled[3],
                  const char *note) {
     ImGui::PushID(key);
+    const float margin = row_margin();   // room for the cursor, as the option rows leave
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + margin);
     ImVec2 p = ImGui::GetCursorScreenPos();
-    float fs = ImGui::GetFontSize(), w = ImGui::GetContentRegionAvail().x, h = floorf(fs * 1.9f), cx[3], cw;
+    float fs = ImGui::GetFontSize(), w = ImGui::GetContentRegionAvail().x - margin, h = floorf(fs * 1.9f), cx[3], cw;
     bind_columns(p.x, w, cx, &cw);
     ImDrawList *dl = ImGui::GetWindowDrawList();
-    float r = 8 * g_scale, pad = 6 * g_scale;
+    float pad = 6 * g_scale;
     fit_text(dl, p.x + 16 * g_scale, cx[0] - fs * 0.3f, p.y, h, IM_COL32(240, 236, 224, 255), label, false);
     int result = -1;
     bool row_foc = false, row_hov = false;
@@ -461,7 +526,7 @@ int opt_bind_row(const char *key, const char *label, UiTextId desc, const char *
         ImVec2 a(cx[c], p.y), b(cx[c] + cw, p.y + h);
         const char *t = cells[c] && cells[c][0] ? cells[c] : "-";
         if (!enabled[c]) {   // not a nav item: the cursor skips it
-            dl->AddRect(a, b, IM_COL32(255, 255, 255, 14), r);
+            skin_button(dl, a, b, g_scale, 0, true);
             fit_text(dl, a.x + pad, b.x - pad, a.y, h, kGrey, t, true);
             continue;
         }
@@ -488,9 +553,9 @@ int opt_bind_row(const char *key, const char *label, UiTextId desc, const char *
         if (foc && (ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false) ||
                     ImGui::IsKeyPressed(ImGuiKey_GamepadFaceUp, false)))
             result = 10 + c;
-        dl->AddRectFilled(a, b, hov || foc ? IM_COL32(255, 255, 255, 22) : IM_COL32(0, 0, 0, 40), r);
-        dl->AddRect(a, b, hov || foc ? kGold : IM_COL32(255, 255, 255, 38), r, 0, hov || foc ? 2.0f : 1.0f);
-        fit_text(dl, a.x + pad, b.x - pad, a.y, h, IM_COL32(255, 255, 255, 255), t, true);
+        skin_button(dl, a, b, g_scale, foc ? 1.0f : hov ? 0.6f : 0.0f, false);   // a small brown button per cell
+        if (foc || (hov && !g_cursor.on)) g_cursor.on = true, g_cursor.a = a, g_cursor.b = b, g_cursor.alpha = foc ? 1.0f : 0.55f;
+        fit_text(dl, a.x + pad, b.x - pad, a.y, h, SKIN_TEXT, t, true);
         ImGui::PopID();
     }
     char k[64];

@@ -12,9 +12,9 @@ amplitude before the strength (0.2 to 1.5, default 0.6; lower makes weak pulses 
 
 `NX2NAVI_PAD_LAYOUT` (`pad_layout`, the *Button layout* row on the Controls tab, live) picks which face button is Switch A:
 
-- `nintendo`: by position, as on a Switch (the table below).
+- `nintendo` (default): by position, as on a Switch (the table below).
 - `xbox`: south A, east B, west X, north Y, as an Xbox pad labels them; on a PlayStation pad cross is A, circle B, square X, triangle Y.
-- `auto` (default): `nintendo` for a pad whose east button SDL reports labelled A (Switch Pro Controller, Nintendo-layout pads), `xbox` for the others.
+- `auto`: `nintendo` for a pad whose east button SDL reports labelled A (Switch Pro Controller, Nintendo-layout pads), `xbox` for the others.
 
 The log names the layout in effect (`input: gamepad layout ...`) and each gamepad's first press
 (`input: gamepad "...": first press`); the menu shows the layout under *Automatic*. The game's prompts show the Switch

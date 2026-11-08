@@ -68,9 +68,9 @@ and `VK_EXT_mesh_shader`. The setup is not signed, so SmartScreen warns on its f
 ## License
 
 The source is public to read. Its additions and changes are all rights reserved ([LICENSE-ADDITIONS](LICENSE-ADDITIONS)):
-no part of them may be copied, published, or used to train, fine-tune or prompt AI models or AI coding tools without
-written permission. The base import stays under its [MIT License](LICENSE), and third-party code keeps its own license
-([THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)). No license grants anything for Nintendo's game.
+no part of them may be copied or published without written permission. The base import stays under its
+[MIT License](LICENSE), and third-party code keeps its own license ([THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
+No license grants anything for Nintendo's game.
 
 NX2navi is an independent, non-commercial fan project, not affiliated with or endorsed by Nintendo. *The Legend
 of Zelda*, *Ocarina of Time* and *Nintendo Switch* are trademarks of Nintendo.
@@ -79,6 +79,3 @@ of Zelda*, *Ocarina of Time* and *Nintendo Switch* are trademarks of Nintendo.
 
 [docs/building.md](docs/building.md) lists the toolchain and the steps. Everything the build writes stays under
 `build\` and `generated\`, which git ignores; run `tools/check_content.py` before a commit.
-
-Most of the code and documentation is written by AI coding agents (Claude Code) under the maintainer's direction; the
-maintainer plays every build and decides what is merged. [AGENTS.md](AGENTS.md) holds the rules they work under.

@@ -2,7 +2,7 @@
 // Camera motion vectors for DLAA (vk_dlaa.c mv_pass): each pixel's depth is taken back to the world through this
 // frame's view-projection and forward through last frame's; the vector is last frame's window position minus this
 // frame's, in render pixels, without the jitter (DLSS's default convention). Objects that move on their own get only
-// the camera's motion.
+// the camera's motion here: the per-object pass (vk_exec_draw.c) or the depth check below corrects theirs.
 // The camera block is NX2navi's scene uniform block (bound as c4 in the scene's vertex shaders): vec4 rows 3-6 are the
 // view-projection, rows of a row-major 4x4 with OpenGL clip depth (-w..w). The replay's viewports have negative
 // heights, so window y grows downwards from ndc y = +1, and depth is z_ndc * 0.5 + 0.5.
@@ -12,6 +12,14 @@
 // from last frame (the previous class mask, read through the motion vector, 3x3): there the history holds a moving
 // character that the camera-only vector does not follow, which is the trail. chars_out keeps this frame's mask for the
 // next; chars_prev is last frame's (pc.prev_ok 0: none).
+// Each pixel's view distance is also kept for the next frame (depth_out; depth_prev is last frame's, pc.zprev_ok 1 when
+// it holds one). With pc.zfit > 0 (a frame without object motion and without the class buffer: Ocarina's) the vector is
+// checked against it. The camera's motion predicts how far the surface was last frame at the place it came from; where
+// last frame's depth there disagrees, the surface moved on its own. The commonest such surface is the character the
+// camera follows, which stays where it is on screen: when last frame's depth at the same pixel agrees, the vector is
+// zero instead. Either way such a pixel gets the bias mask (pc.zmask), so DLSS takes this frame's colour where its
+// history holds something else (the trail behind a running Link). pc.dz: the projection's depth terms (rows 2 and 3,
+// columns 2 and 3) that take ndc depth back to view distance.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D depth_tex;
 layout(binding = 1, rg16f) uniform writeonly image2D mv_out;
@@ -21,12 +29,42 @@ layout(binding = 4) uniform sampler2D ids_tex;
 layout(binding = 5, r8) uniform writeonly image2D mask_out;
 layout(binding = 6, r8) uniform readonly image2D chars_prev;
 layout(binding = 7, r8) uniform writeonly image2D chars_out;
+layout(binding = 8, r32f) uniform readonly image2D depth_prev;
+layout(binding = 9, r32f) uniform writeonly image2D depth_out;
 layout(push_constant) uniform P {
     vec2 size;     // render size in pixels
     vec2 jitter;   // this frame's jitter, pixels, as the scene was drawn (window x right, y down)
     float bias;    // the mask value for character pixels; 0: no mask (bindings 4-7 unused)
     float prev_ok; // 1: chars_prev holds last frame's class mask at this size
+    float zfit;    // 1: the depth check above; 0: off
+    float zprev_ok;// 1: depth_prev holds last frame's view distances at this size
+    vec4 dz;       // the projection's [2][2], [2][3], [3][2], [3][3] (row-major)
+    float zmask;   // the depth check's mask value (0: the vectors are checked, no mask)
 } pc;
+
+// View distance from ndc depth; 0 for the sky and other points at or past the far plane.
+float dist(float zn) {
+    float den = pc.dz.z * zn - pc.dz.x;
+    if (abs(den) < 1e-12) return 0.0;
+    float z = (pc.dz.y - pc.dz.w * zn) / den;
+    return abs(z) < 1e7 ? abs(z) : 0.0;
+}
+
+// How far last frame's distance near window position w is from the distance expected there, relative: the closest of
+// the 3x3 pixels around it, so a reprojection that lands a pixel across a silhouette (foliage, a roof's edge) is not
+// taken for motion. 0 off screen (nothing to compare: the surface just came into view, DLSS handles that), 1e9 where
+// last frame had only sky there.
+float miss(vec2 w, float expect) {
+    ivec2 q = ivec2(floor(w)), hi = ivec2(pc.size) - 1;
+    if (any(lessThan(q, ivec2(0))) || any(greaterThan(q, hi))) return 0.0;
+    float best = 1e9;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            float was = imageLoad(depth_prev, clamp(q + ivec2(dx, dy), ivec2(0), hi)).r;
+            if (was > 0.0) best = min(best, abs(was - expect) / expect);
+        }
+    return best;
+}
 
 mat4 vp(vec4 a, vec4 b, vec4 c, vec4 d) { return transpose(mat4(a, b, c, d)); }
 
@@ -48,7 +86,24 @@ void main() {
             mv = pwin - win;
         }
     }
+    float zn = d * 2.0 - 1.0, here = pc.zfit > 0.0 ? dist(zn) : 0.0;
+    imageStore(depth_out, p, vec4(here));
+    float moved = 0.0;
+    if (pc.zfit > 0.0 && pc.zprev_ok > 0.5 && here > 0.0 && abs(world.w) > 1e-12) {
+        vec4 clip = q * (world / world.w);
+        float there = abs(clip.w) > 1e-12 ? dist(clip.z / clip.w) : 0.0;
+        // 4 %: the depth of a still surface reprojected through the camera lands within about 1 % of last frame's
+        // (sub-pixel position and the depth buffer's precision); a character a step away from the wall behind it is
+        // 10 % and more
+        const float TOL = 0.04;
+        float cam = there > 0.0 ? miss(win + mv, there) : 1e9;
+        if (cam > TOL) {
+            moved = 1.0;
+            if (miss(win, here) < TOL) mv = vec2(0.0);   // it kept its place on screen: the followed character
+        }
+    }
     imageStore(mv_out, p, vec4(mv, 0.0, 0.0));
+    if (pc.zfit > 0.0) imageStore(mask_out, p, vec4(moved * pc.zmask));
     if (pc.bias <= 0.0) return;
     float ch = texelFetch(ids_tex, p, 0).g > 64.0 / 255.0 ? 1.0 : 0.0;
     imageStore(chars_out, p, vec4(ch));

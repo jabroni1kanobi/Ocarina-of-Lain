@@ -315,6 +315,10 @@ static struct {
         VmaAllocation mask_mem, chars_mem[2];
         VkImageView mask_view, chars_view[2];
         int chars_cur, chars_ok; // chars[chars_cur] is written next; chars_ok: the other holds last frame's
+        VkImage dist[2];         // each pixel's view distance, this and last frame (R32F, dlaa_mv.comp depth_out)
+        VmaAllocation dist_mem[2];
+        VkImageView dist_view[2];
+        int dist_cur, dist_ok;   // as chars_cur and chars_ok
         NgxHandle *feat;
         uint64_t used;           // evals count when it last ran
     } sizes[5], *last;           // last: the one the previous DLAA frame ran with
@@ -434,6 +438,8 @@ static void free_size(struct Size *e) {
     for (int i = 0; i < 2; i++) {
         if (e->chars_view[i]) vkDestroyImageView(c->device, e->chars_view[i], NULL);
         if (e->chars[i]) vmaDestroyImage(c->vma, e->chars[i], e->chars_mem[i]);
+        if (e->dist_view[i]) vkDestroyImageView(c->device, e->dist_view[i], NULL);
+        if (e->dist[i]) vmaDestroyImage(c->vma, e->dist[i], e->dist_mem[i]);
     }
     if (e->feat && N.release) N.release(e->feat);
     memset(e, 0, sizeof *e);
@@ -461,11 +467,13 @@ static struct Size *size_for(VkCommandBuffer cb, uint32_t w, uint32_t h, uint32_
         !image2d(w, h, VK_FORMAT_R16G16_SFLOAT, u | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &e->mv, &e->mv_mem, &e->mv_view) ||
         !image2d(w, h, VK_FORMAT_R8_UNORM, u8, &e->mask, &e->mask_mem, &e->mask_view) ||
         !image2d(w, h, VK_FORMAT_R8_UNORM, u8, &e->chars[0], &e->chars_mem[0], &e->chars_view[0]) ||
-        !image2d(w, h, VK_FORMAT_R8_UNORM, u8, &e->chars[1], &e->chars_mem[1], &e->chars_view[1]))
+        !image2d(w, h, VK_FORMAT_R8_UNORM, u8, &e->chars[1], &e->chars_mem[1], &e->chars_view[1]) ||
+        !image2d(w, h, VK_FORMAT_R32_SFLOAT, u8, &e->dist[0], &e->dist_mem[0], &e->dist_view[0]) ||
+        !image2d(w, h, VK_FORMAT_R32_SFLOAT, u8, &e->dist[1], &e->dist_mem[1], &e->dist_view[1]))
         return NULL;
-    VkImageMemoryBarrier2 ib[5];
-    VkImage im[5] = {e->out, e->mv, e->mask, e->chars[0], e->chars[1]};
-    for (int i = 0; i < 5; i++)
+    VkImageMemoryBarrier2 ib[7];
+    VkImage im[7] = {e->out, e->mv, e->mask, e->chars[0], e->chars[1], e->dist[0], e->dist[1]};
+    for (int i = 0; i < 7; i++)
         ib[i] = (VkImageMemoryBarrier2){.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
                                         .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                                         .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
@@ -474,7 +482,7 @@ static struct Size *size_for(VkCommandBuffer cb, uint32_t w, uint32_t h, uint32_
                                         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                                         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = im[i],
                                         .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
-    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 5,
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 7,
                            .pImageMemoryBarriers = ib};
     vkCmdPipelineBarrier2(cb, &di);
     e->w = w, e->h = h, e->ow = ow, e->oh = oh;
@@ -571,11 +579,18 @@ static void times_begin(VkCommandBuffer cb) {
 #define CAM_SLOT 0xa00u    // camb slot stride
 #define MVM_SLOTS 16u      // frames the GPU may still be reading the reprojection blocks of
 
+// dlaa_mv.comp's push constants in its layout (std430: dz at offset 32)
+typedef struct {
+    float size[2], jitter[2], bias, prev_ok, zfit, zprev_ok;
+    float dz[4];   // the projection's [2][2], [2][3], [3][2], [3][3]
+    float zmask;
+} MvPush;
+
 static int mv_init(void) {
     if (D.mv_ok >= 0) return D.mv_ok;
     D.mv_ok = 0;
     const VkCtx *c = vk_ctx();
-    VkDescriptorSetLayoutBinding b[8] = {
+    VkDescriptorSetLayoutBinding b[10] = {
         {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
         {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
         {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
@@ -583,11 +598,13 @@ static int mv_init(void) {
         {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
         {5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
         {6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
-        {7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
+        {7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+        {8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+        {9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
     VkDescriptorSetLayoutCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                            .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-                                           .bindingCount = 8, .pBindings = b};
-    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 24};
+                                           .bindingCount = 10, .pBindings = b};
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MvPush)};
     VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST,
                               .minFilter = VK_FILTER_NEAREST, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
                               .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
@@ -707,7 +724,7 @@ static int mv_pass(VkExec *ex, struct Size *e, VkImageView zv, float jx, float j
         !vk_usnap_find(D.cam_addr, D.cam_size == OCAM_BLOCK ? OCAM_BYTES : D.cam_size, 4, &cam)) {
         D.mv_none++;
         D.cam_prev_ok = 0;
-        e->chars_ok = 0;
+        e->chars_ok = e->dist_ok = 0;
         return 0;
     }
     // this frame's view-projection as the snapshot holds it, for the reprojection; kept as last frame's for the next
@@ -740,7 +757,7 @@ static int mv_pass(VkExec *ex, struct Size *e, VkImageView zv, float jx, float j
     D.cam_slot ^= 1, D.cam_prev_ok = cr != NULL;
     if (cr) memcpy(D.cam_prev, cur_vp, sizeof cur_vp);
     if (!had_prev || !have_m) {   // nothing to reproject into: zero motion, new history
-        e->chars_ok = 0;
+        e->chars_ok = e->dist_ok = 0;
         return 0;
     }
     VkDescriptorImageInfo zi = {D.mv_samp, zv, VK_IMAGE_LAYOUT_GENERAL};
@@ -766,7 +783,9 @@ static int mv_pass(VkExec *ex, struct Size *e, VkImageView zv, float jx, float j
     VkDescriptorImageInfo mki = {VK_NULL_HANDLE, e->mask_view, VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorImageInfo cpi = {VK_NULL_HANDLE, e->chars_view[cur_c ^ 1], VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorImageInfo coi = {VK_NULL_HANDLE, e->chars_view[cur_c], VK_IMAGE_LAYOUT_GENERAL};
-    VkWriteDescriptorSet wr[8] = {
+    VkDescriptorImageInfo dpi = {VK_NULL_HANDLE, e->dist_view[e->dist_cur ^ 1], VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo doi = {VK_NULL_HANDLE, e->dist_view[e->dist_cur], VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet wr[10] = {
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1,
          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &zi},
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1,
@@ -782,13 +801,26 @@ static int mv_pass(VkExec *ex, struct Size *e, VkImageView zv, float jx, float j
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 6, .descriptorCount = 1,
          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &cpi},
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 7, .descriptorCount = 1,
-         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &coi}};
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &coi},
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 8, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &dpi},
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 9, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &doi}};
     times_begin(cb);
     times_mark(cb, T_MV0);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, D.mv_pipe);
-    rec_push(vk_pipeline_push_fn(), cb, VK_PIPELINE_BIND_POINT_COMPUTE, D.mv_layout, 0, 8, wr);
-    float pc[6] = {(float)w, (float)h, jx, jy, use ? bias : 0.0f, use && e->chars_ok ? 1.0f : 0.0f};
-    vkCmdPushConstants(cb, D.mv_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
+    rec_push(vk_pipeline_push_fn(), cb, VK_PIPELINE_BIND_POINT_COMPUTE, D.mv_layout, 0, 10, wr);
+    // The depth check (dlaa_mv.comp, depth_prev) where nothing else gives characters their own motion: Ocarina's frame,
+    // which has neither the per-object pass nor the class buffer. Its distances take the projection's depth terms from
+    // rows 7-10 of the scene context (ocam_vp). NX2NAVI_DLAA_ZFIT=0 (test): the camera's motion alone, as before.
+    static int zfit_on = -1;
+    if (zfit_on < 0) zfit_on = rt_knob("DLAA_ZFIT", "1");
+    int zfit = zfit_on && !use && cr && D.cam_size == OCAM_BLOCK;
+    MvPush pc = {{(float)w, (float)h}, {jx, jy}, use ? bias : 0.0f, use && e->chars_ok ? 1.0f : 0.0f,
+                 zfit ? 1.0f : 0.0f, zfit && e->dist_ok ? 1.0f : 0.0f,
+                 {zfit ? cr[38] : 0.0f, zfit ? cr[39] : 0.0f, zfit ? cr[42] : 0.0f, zfit ? cr[43] : 0.0f},
+                 zfit ? bias : 0.0f};
+    vkCmdPushConstants(cb, D.mv_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
     vkCmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1);
     full_barrier(cb);
     times_mark(cb, T_MV1);
@@ -803,7 +835,9 @@ static int mv_pass(VkExec *ex, struct Size *e, VkImageView zv, float jx, float j
     D.mv_frames++;
     if (use) e->chars_cur ^= 1, e->chars_ok = 1, D.masked++;
     else e->chars_ok = 0;
-    *masked = use;
+    if (zfit && bias > 0) D.masked++;
+    e->dist_cur ^= 1, e->dist_ok = zfit;
+    *masked = use || (zfit && bias > 0);
     return 1;
 }
 
@@ -1081,7 +1115,9 @@ static int preset_value(void) {
 // How strongly DLSS favours the current frame on characters and where they just were (NX2NAVI_DLSS_CHAR_MASK, percent,
 // live; 0 off). Where a character's vectors are the camera's only (dlaa_objmv = 0, or a draw the per-object pass
 // skips), one that moves on its own drags a faint copy of itself through DLSS's history; the bias mask makes DLSS take
-// less of the history there, at the cost of some of its anti-aliasing on those pixels.
+// less of the history there, at the cost of some of its anti-aliasing on those pixels. Ocarina's frame has no class
+// buffer to find characters by: there the mask covers the pixels whose depth the camera's motion does not explain
+// (dlaa_mv.comp, the depth check).
 static float char_bias(void) {
     const char *v = cfg_get("NX2NAVI_DLSS_CHAR_MASK");
     long n = v && *v ? strtol(v, NULL, 10) : 65;
@@ -1233,9 +1269,10 @@ evaluated:
     if (mvdebug < 0) mvdebug = rt_knob("DLAA_MVDEBUG", "0");
     static int maskdebug = -1;
     if (maskdebug < 0) maskdebug = rt_knob("DLAA_MASKDEBUG", "0");
-    if (mvdebug || (maskdebug && mk)) b.srcOffsets[1] = (VkOffset3D){(int32_t)w, (int32_t)h, 1};
-    vkCmdBlitImage(cb, mvdebug ? e->mv : maskdebug && mk ? mk->mask : e->out, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &b,
-                   VK_FILTER_NEAREST);
+    // (NX2NAVI_DLAA_MASKDEBUG=1 shows whichever bias mask DLSS got: the reactive one, or the characters')
+    VkImage shown = mvdebug ? e->mv : maskdebug && mk ? mk->mask : maskdebug && masked ? e->mask : e->out;
+    if (shown != e->out) b.srcOffsets[1] = (VkOffset3D){(int32_t)w, (int32_t)h, 1};
+    vkCmdBlitImage(cb, shown, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_NEAREST);
     full_barrier(cb);
     if (dst != t) vk_dlaa_swap_img = t->img, vk_dlaa_swap_view = e->out_view;   // the scaling draw reads DLSS's picture
     if (vk_dlaa_hudless_wanted) hudless(cb, e, ow, oh);   // frame generation keeps the HUD out of its generated frames

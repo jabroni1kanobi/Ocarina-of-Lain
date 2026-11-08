@@ -243,10 +243,13 @@ uint32_t vk_gpa_remap(uint64_t lo, uint64_t hi, uint32_t old_rec, VkBuffer buf, 
     uint64_t dev = vk_gpa_device_address(buf);
     uint64_t p0 = (lo + 4095) >> PAGE_SHIFT, p1 = hi >> PAGE_SHIFT;
     plat_mutex_lock(&gpa_lock);
-    // the twin: the buffer the pages named before (the pool's imported buffer), so writes reach guest memory too
-    uint64_t twin = old_rec ? (uint64_t)G.cpu[REC_WORD + old_rec * REC_WORDS] |
-                                  (uint64_t)G.cpu[REC_WORD + old_rec * REC_WORDS + 1] << 32
-                            : dev - buf_lo;
+    // the twin: the buffer the pages named before (the pool's imported buffer), so writes reach guest memory too.
+    // NX2NAVI_GPA_TWIN=0 (diagnosis): no twin, the writes go to the mirror alone, as before patch 0034.
+    static int twins = -1;
+    if (twins < 0) { const char *e = cfg_get("NX2NAVI_GPA_TWIN"); twins = !(e && !strcmp(e, "0")); }
+    uint64_t twin = old_rec && twins ? (uint64_t)G.cpu[REC_WORD + old_rec * REC_WORDS] |
+                                           (uint64_t)G.cpu[REC_WORD + old_rec * REC_WORDS + 1] << 32
+                                     : dev - buf_lo;
     uint32_t r = dev ? rec_alloc(dev - buf_lo, twin) : 0;
     if (!r) { plat_mutex_unlock(&gpa_lock); return old_rec; }
     for (uint64_t p = p0; p < p1; p++) {

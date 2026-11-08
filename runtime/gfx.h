@@ -79,12 +79,17 @@ void gfx_shader_prepare_recorded(int threads, int procs);
 // nx2navi.exe --prepare-shaders: translates <dir>/seed-answers.bin + seed-programs.bin (tools/prepare_shaders.py) and
 // writes <dir>/shader-prepared.bin (stage, priority, input id per variant). 0 on success.
 int gfx_shader_prepare_seed(const char *dir, int threads, int procs);
+// gfx_shader_guess.c: the answers of a prepared default variant, read from its first translation s: vertex inputs the
+// shader reads as integers become uint, a compute shader's textures and images take the types its translation
+// declares. 1 when *out differs from *a (translate again with *out).
+int gfx_shader_guess_refine(const GfxShader *s, int stage, const GfxShaderAnswers *a, GfxShaderAnswers *out);
 typedef struct { uint8_t iid[32]; uint8_t stage, prio; } GfxWarmEnt;   // prio 0: met in play; 1..3: prepared
 size_t gfx_shader_warm_list(GfxWarmEnt **out);              // malloc'd; recorded first, then prepared; needs recording on
 // Disk-cache load the caller owns (*owned 1: release it), or the memory cache's entry (*owned 0). NULL if not cached.
 const GfxShader *gfx_shader_load_private(const uint8_t iid[32], int *owned);
 void gfx_shader_release_private(const GfxShader *s);
 const uint32_t *gfx_shader_spirv(const GfxShader *s, uint64_t *words);
+int gfx_shader_write_code(const GfxShader *s, const char *path);   // the guest program, from the stored inputs
 // A shader of the runtime's own (SPIR-V and a .res.json text as the translator writes them), outside the cache and
 // never freed; its key is the sha256 of both. NULL when the SPIR-V is malformed.
 const GfxShader *gfx_shader_own(const uint32_t *spirv, uint64_t words, const char *res_json);

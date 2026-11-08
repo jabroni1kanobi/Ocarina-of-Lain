@@ -117,11 +117,15 @@ folder's `licenses/` and in each component's own folder.
 | CPython 3.14.9 embeddable package; includes `vcruntime140*.dll` (Microsoft, redistributable with Python), OpenSSL, libffi, SQLite, zlib, libmpdec | https://www.python.org/downloads/release/python-3149/ | PSF-2.0 | `python/` |
 | `tkinter` and Tcl/Tk 9.0 (`_tkinter.pyd`, `tcl90.dll`, `tcl9tk90.dll`, `zlib1.dll`, `libtommath.dll`, `tcl/`), from python.org's 3.14.9 `amd64/tcltk.msi`, unpacked, never run | https://www.python.org/ftp/python/3.14.9/amd64/ | PSF-2.0; Tcl/Tk licence (BSD-style); libtommath public domain or BSD; zlib licence | `python/` |
 | numpy 2.5.4 (with its bundled OpenBLAS), lz4 4.4.5, zstandard 0.25.0 | PyPI binary wheels, pins in `tools/requirements-launcher.txt` | BSD-3-Clause; lz4 BSD-3-Clause; zstandard BSD-3-Clause | `python/Lib/site-packages/` |
+| The runtime of this repository compiled into `lib/libnx2navirt.a` (`tools/make_game.py --make-runtime-lib`), with the third-party code it contains as listed in the tables above (Dear ImGui, the copied runtime parts, FidelityFX FSR 1, Vulkan Memory Allocator and the others) and inline code from the toolchain's C++ headers | this repository; MSYS2 UCRT64 toolchain of `toolchain.lock.json` | as listed above for each part; libstdc++ headers GPL-3.0 with the GCC Runtime Library Exception | `app/<version>/lib/` |
+| truststore 0.10.5, unmodified (Windows' own certificate check for `launcher/net.py`) | https://pypi.org/project/truststore/0.10.5/ (`truststore-0.10.5-py3-none-any.whl`, pinned with its sha256 in `tools/requirements-launcher.txt`), Copyright (c) 2022 Seth Michael Larson | MIT | `python/Lib/site-packages/truststore/`, its licence in `truststore-0.10.5.dist-info/licenses/` |
 | zlib 1.4 (MSYS2 `mingw-w64-ucrt-x86_64-zlib`), static library | https://zlib.net, Copyright (C) Jean-loup Gailly and Mark Adler | zlib | linked into `NX2navi-Setup.exe` (its unzip) |
 | mingw-w64 CRT startup code and winpthreads 14.0.0, GCC 16.2.0's `libgcc` (MSYS2 packages), static | https://www.mingw-w64.org, https://gcc.gnu.org | mingw-w64: ZPL-2.1 / MIT / public domain; libgcc: GPL-3.0 with the GCC Runtime Library Exception | linked into `NX2navi.exe` and `NX2navi-Setup.exe` |
 
 Downloaded on the player's PC by the launcher, not distributed: the MSYS2 UCRT64 packages that
 `toolchain.lock.json` pins (clang and LLVM, Apache-2.0 with LLVM exception; GCC and binutils, GPL-3.0; the
 libraries of the "Compiler runtime in a source build" section and of `README-BuildKit.md`), from
-https://repo.msys2.org/mingw/ucrt64/; and zbic 1.0.1.post1 (GPL-2.0), from PyPI. The game build links them as a
-source build does.
+https://repo.msys2.org/mingw/ucrt64/; the MSYS2 CLANG64 clang it pins beside them (clang, LLVM and libc++,
+Apache-2.0 with LLVM exception; libffi MIT; zlib; zstd BSD-3-Clause; libxml2 MIT; libiconv LGPL-2.1+), from
+https://repo.msys2.org/mingw/clang64/, which only compiles the lifted code; and zbic 1.0.1.post1 (GPL-2.0), from
+PyPI. The game build links them as a source build does.

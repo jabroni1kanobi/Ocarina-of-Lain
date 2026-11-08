@@ -334,6 +334,22 @@ int probe_cfg(void) {
         CHECK(a_east == EQ(input_prompts_folder(PROMPTS_XBOX, layouts[i]), "romfs-patches-xbox"),
               "prompts: the folder names A as B exactly when the layout puts A on the button labelled B");
     }
+    // The default layout is the Switch's own buttons by position, whatever the pad's labels (an Xbox pad's east button
+    // is labelled B and does Switch A): A right, B bottom, X top, Y left, L/R the bumpers, ZL/ZR the triggers.
+    const CfgMeta *pl = cfg_meta("PAD_LAYOUT");
+    CHECK(pl && input_pad_layout_pick(pl->def, 0) == PAD_LAYOUT_NINTENDO, "pad layout: the default is Nintendo, also for an Xbox pad");
+    static const struct { int pad, button; } sw[] = {{PAD_EAST, B_A}, {PAD_SOUTH, B_B}, {PAD_NORTH, B_X}, {PAD_WEST, B_Y},
+                                                      {PAD_L, B_L}, {PAD_R, B_R}, {PAD_ZL, B_ZL}, {PAD_ZR, B_ZR},
+                                                      {PAD_START, B_PLUS}, {PAD_BACK, B_MINUS}, {PAD_LSTICK, B_STICK_L},
+                                                      {PAD_RSTICK, B_STICK_R}, {PAD_DPAD_UP, B_UP}, {PAD_DPAD_DOWN, B_DOWN},
+                                                      {PAD_DPAD_LEFT, B_LEFT}, {PAD_DPAD_RIGHT, B_RIGHT}};
+    int sw_ok = 1;
+    for (size_t i = 0; i < sizeof sw / sizeof *sw; i++) {
+        uint8_t one[PAD_COUNT] = {0};
+        one[sw[i].pad] = 1;
+        sw_ok &= input_map_pad_buttons(one, PAD_LAYOUT_NINTENDO) == 1ull << sw[i].button;
+    }
+    CHECK(sw_ok, "pad layout: Nintendo puts every Switch button at its position on the Switch");
     uint8_t pd[PAD_COUNT] = {0};
     pd[PAD_SOUTH] = pd[PAD_NORTH] = 1;
     CHECK(input_map_pad_buttons(pd, PAD_LAYOUT_NINTENDO) == (1ull << B_B | 1ull << B_X) &&

@@ -487,7 +487,7 @@ __attribute__((format(printf, 2, 3))) static void sp(Str *b, const char *fmt, ..
     b->n += (size_t)k;
 }
 
-// SPIR-V hash of a shader; the first time, its SPIR-V goes to sh_<hash>.spv.
+// SPIR-V hash of a shader; the first time, its SPIR-V goes to sh_<hash>.spv and its guest program to sh_<hash>.code.
 static uint64_t shader_hash(const GfxShader *s) {
     static struct { const GfxShader *s; uint64_t h; } tab[1024];
     static int n;
@@ -502,6 +502,8 @@ static uint64_t shader_hash(const GfxShader *s) {
     snprintf(path, sizeof path, "%s/sh_%016llx.spv", dir, (unsigned long long)h);
     FILE *f = fopen(path, "wb");
     if (f) fwrite(w, 4, (size_t)words, f), fclose(f);
+    snprintf(path, sizeof path, "%s/sh_%016llx.code", dir, (unsigned long long)h);   // the guest program it came from
+    gfx_shader_write_code(s, path);
     if (n < 1024) tab[n].s = s, tab[n].h = h, n++;
     return h;
 }
@@ -674,6 +676,12 @@ static void describe_bindings(Str *b, const VkExec *ex, const VkPipeInfo *info) 
                    mf == 1 || mf == 3 || mf == 5 ? "L" : "N", mf <= 1 ? "none" : mf >= 4 ? "L" : "N",
                    wrap_name(s.ws), wrap_name(s.wt), wrap_name(s.wr), s.aniso, s.lod_min, s.lod_max, s.lod_bias,
                    s.cmp_mode ? " compare" : "");
+                int bw = 0;   // a border wrap: its colour, as the sampler builder stored it
+                for (int k = 0; k < 3; k++) {
+                    uint8_t wm = k == 0 ? s.ws : k == 1 ? s.wt : s.wr;
+                    bw |= wm == NVN_WRAP_MODE_CLAMP_TO_BORDER || wm == NVN_WRAP_MODE_MIRROR_CLAMP_TO_BORDER;
+                }
+                if (bw) sp(b, " border %g,%g,%g,%g", s.border[0], s.border[1], s.border[2], s.border[3]);
             } else {
                 sp(b, " | samp %d empty (default sampler)", NVN_HANDLE_SAMP(h));
             }
