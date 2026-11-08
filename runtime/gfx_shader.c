@@ -571,15 +571,18 @@ static int spirv_complete(const uint32_t *w, uint64_t n) {
 // the denormal and quiets the NaN, which turned the +1/-1 sign of the leaf sprites' scale into 0 and 2e9: triangles over
 // the whole shadow map, 1.7 billion fragments a frame on an RX 9070. A module holding such a constant declares that it
 // needs those bits kept (SPV_KHR_float_controls, 32-bit). In memory only: the cache keys and files stay as they are.
-// NX2NAVI_FLOAT_BITS=0 turns this off (diagnosis).
-static void spirv_float_bits(uint32_t **spirv, uint64_t *words) {
+// NX2NAVI_FLOAT_BITS is a mask of the stages that get it: 1 mesh and task (default), 2 vertex, 4 fragment, 8 compute.
+// All of them is wrong: with every stage marked, 31 frames after the Kokiri load were black and white noise over the
+// whole picture (kept NaNs reaching the screen), which the same run without the mode does not show.
+static void spirv_float_bits(uint32_t **spirv, uint64_t *words, int stage) {
     enum { OP_EXTENSION = 10, OP_EXT_IMPORT = 11, OP_MEMORY_MODEL = 14, OP_ENTRY_POINT = 15, OP_EXEC_MODE = 16,
            OP_CAPABILITY = 17, OP_TYPE_FLOAT = 22, OP_CONSTANT = 43, CAP_DENORM_PRESERVE = 4464, CAP_NAN_PRESERVE = 4466,
            MODE_DENORM_PRESERVE = 4459, MODE_NAN_PRESERVE = 4461, MAX_ENTRIES = 8 };
     static const char ext[] = "SPV_KHR_float_controls";   // 22 characters and the terminator: 6 words
     static int on = -1;
     if (on < 0) on = rt_knob("FLOAT_BITS", "1");
-    if (!on) return;
+    int bit = stage == GFX_STAGE_MS || stage == GFX_STAGE_TS ? 1 : stage == GFX_STAGE_VS ? 2 : stage == GFX_STAGE_FS ? 4 : stage == GFX_STAGE_CS ? 8 : 0;
+    if (!(on & bit)) return;
     const uint32_t *w = *spirv;
     uint64_t n = *words, first_cap = 0, first_ext = 0, after_entries = 0;
     uint32_t entries[MAX_ENTRIES], nent = 0, f32 = 0;
@@ -674,7 +677,7 @@ static GfxShader *disk_load_from(const uint8_t key[32], const uint8_t *iid, int 
     s->reflection_size = res_size;
     reflect(s);
     if (s->stage == GFX_STAGE_FS) vk_hdr_shader_swap(&s->spirv, &s->words);   // the in-memory copy; the cache keeps its own
-    spirv_float_bits(&s->spirv, &s->words);
+    spirv_float_bits(&s->spirv, &s->words, s->stage);
     return s;
 }
 
