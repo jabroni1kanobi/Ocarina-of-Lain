@@ -150,7 +150,7 @@ static void pt_dump(void *arg) {
     float period = c->props.limits.timestampPeriod;
     uint64_t base = 0;
     uint32_t have = 0;
-    fprintf(f, "frame\tkind\tfence\tstep\tw\th\td\tncolor\tcolor0\tdepth\tdraws\tfirst0\tfirst1\tlast0\tlast1\tstart_us\tend_us\tgroups\tfrags\tprims\n");
+    fprintf(f, "frame\tkind\tfence\tstep\tw\th\td\tncolor\tcolor0\tdepth\tdraws\tfirst0\tfirst1\tlast0\tlast1\tstart_us\tend_us\tgroups\tfrags\tprims\tfirst\n");
     for (uint32_t i = 0; i < n; i++) {
         uint64_t v[4];
         VkResult r = vkGetQueryPoolResults(c->device, pt_pool, 2 * i, 2, sizeof v, v, 2 * sizeof v[0],
@@ -162,12 +162,12 @@ static void pt_dump(void *arg) {
         if (!base) base = v[0];
         have++;
         const VkPassMark *m = &p->m;
-        fprintf(f, "%llu\t%c\t%llu\t%u\t%u\t%u\t%u\t%u\t%d\t%d\t%u\t%016llx\t%016llx\t%016llx\t%016llx\t%.2f\t%.2f\t%u\t%llu\t%llu\n",
+        fprintf(f, "%llu\t%c\t%llu\t%u\t%u\t%u\t%u\t%u\t%d\t%d\t%u\t%016llx\t%016llx\t%016llx\t%016llx\t%.2f\t%.2f\t%u\t%llu\t%llu\t%u\n",
                 (unsigned long long)p->frame, m->kind == VK_MARK_DISPATCH ? 'D' : 'P', (unsigned long long)m->fence, m->step,
                 m->w, m->h, m->d, m->ncolor, m->ncolor ? (int)m->color[0] : 0, (int)m->depth,
                 m->draws == UINT32_MAX ? 0 : m->draws, shader_id(m->first[0]), shader_id(m->first[1]), shader_id(m->last[0]),
                 shader_id(m->last[1]), (double)(int64_t)(v[0] - base) * period / 1000.0,
-                (double)(int64_t)(v[2] - base) * period / 1000.0, pt_counts_map ? pt_counts_map[i] : 0, (unsigned long long)st[0], (unsigned long long)st[1]);
+                (double)(int64_t)(v[2] - base) * period / 1000.0, pt_counts_map ? pt_counts_map[2 * i] : 0, (unsigned long long)st[0], (unsigned long long)st[1], pt_counts_map ? pt_counts_map[2 * i + 1] : 0);
     }
     fclose(f);
     rt_log("vk: passtime: %u of %u marks written", have, n);
@@ -191,7 +191,7 @@ static void pt_open(VkCtx *c) {
                                                       VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT};
     if (!pt_qbegin || !pt_qend || vkCreateQueryPool(c->device, &si, NULL, &pt_stats) != VK_SUCCESS) pt_stats = VK_NULL_HANDLE;
     if (!pt_write || !pt_reset || !pt_rec || vkCreateQueryPool(c->device, &qi, NULL, &pt_pool) != VK_SUCCESS) return;
-    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 4 * PT_MAX, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 8 * PT_MAX, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
                                   .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
                                   .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
@@ -199,7 +199,7 @@ static void pt_open(VkCtx *c) {
     VmaAllocationInfo info;
     if (vmaCreateBuffer(c->vma, &bi, &ai, &pt_counts, &al, &info) == VK_SUCCESS) {
         pt_counts_map = info.pMappedData;
-        memset((void *)pt_counts_map, 0, 4 * PT_MAX);
+        memset((void *)pt_counts_map, 0, 8 * PT_MAX);
     }
     pt_first = a, pt_frames = b;
     pt_state = 1;
@@ -232,7 +232,7 @@ VkBuffer vk_pass_time_count_slot(VkDeviceSize *off) {
     if (pt_state != 2 || !a || !pt_counts) return VK_NULL_HANDLE;
     uint32_t i = seq + 1 - a;
     if (i >= PT_MAX) return VK_NULL_HANDLE;
-    *off = 4ull * i;
+    *off = 8ull * i;
     return pt_counts;
 }
 
