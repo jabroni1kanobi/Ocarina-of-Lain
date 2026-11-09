@@ -1203,13 +1203,16 @@ static Tex *entry_of(const tex_t *t) {
         }
         if (!(e = create_tex(t, &k, tex_alias))) return create_failed(&k), NULL;
         perf_count(PERF_CNT_TEX_NEW);
-        // released entries of another descriptor at this address are replaced by the new one; a live one holding
-        // GPU-written content is the alias source, preferring the one that differs only in swizzle (same_but_swizzle)
+        // Released entries of another descriptor at this address are kept while they are the only copy of
+        // GPU-written content (Hookshot keep-finalized): destroying them here lost that content and the new image
+        // sampled empty for a frame (Kokiri chunk pops at fixed spots, 40 left-uninitialised at the walk burst).
+        // Only released entries that come back intact from storage are replaced. A live one holding GPU-written
+        // content is the alias source, preferring the one that differs only in swizzle (same_but_swizzle)
         int alias = 0;
         Tex *src = NULL;
         for (Tex *p = nvn_hm_get(&by_addr, &k.addr), *nx; p; p = nx) {
             nx = p->next_at;
-            if (p->released) { destroy_tex(p); continue; }
+            if (p->released && comes_back_intact(p)) { destroy_tex(p); continue; }
             alias = 1;
             if (tex_alias && (!src || (same_but_swizzle(&p->key, &k) && !same_but_swizzle(&src->key, &k))) &&
                 alias_compatible(e, p) && alias_has_gpu_content(p))
