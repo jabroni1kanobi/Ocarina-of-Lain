@@ -891,7 +891,7 @@ static void maybe_split(VkExec *ex) {
 // and the running state come back after. One that would still wait after CONT_MAX submissions goes on regardless, as
 // it did before (counted, logged). Only with the replay on the submitting thread: the recording copies a continuation
 // reads stay alive there until the game recycles them, which it does only after the work ran on the console.
-// NX2NAVI_EVENT_ORDER=0: every submission in the order it came.
+// NX2NAVI_EVENT_ORDER=1 turns this on; by default every submission goes in the order it came.
 #define CONT_MAX 36
 #define EVO_QUEUES 16
 typedef struct Cont {
@@ -916,7 +916,7 @@ static const op_hdr *walk(VkExec *ex, const op_hdr *h, int depth);
 static int evo_enabled(void) {
     if (evo_on < 0) {
         const char *e = cfg_get("NX2NAVI_EVENT_ORDER");
-        evo_on = !(e && !strcmp(e, "0"));
+        evo_on = e && !strcmp(e, "1");   // off by default: on AMD it brought the Deku lighting pops and flashes back
         if (evo_on && gfx_replay_async()) {
             evo_on = 0;
             rt_log("vk: event order across queues off: the replay runs on its own thread (NX2NAVI_REPLAY_ASYNC)");

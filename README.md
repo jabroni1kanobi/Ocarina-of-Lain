@@ -35,16 +35,17 @@ Tested on one PC only: Radeon RX 9070, driver 26.10.1, at 2560x1440.
 
 Measured with FSR 3 frame generation on, so each frame above is a real frame and twice as many reach the screen. This build is merged with upstream a3246088: its Kokiri numbers are higher than our earlier 18 ms and 8 ms, which came from a build before the merge, under different settings.
 
-The flash meter found 13 small spikes, about 1% of the picture, on frames 1591 to 1670 of a Kokiri save's route (title screen), and none in the rest of the 7,800 frames. It reads real frames only. No device faults in the runs above.
+The flash meter found no spikes over 4,200 frames of the Deku Tree cutscene at the settings above. It reads real frames only.
 
 ## Known problems
 
-- Slight flashes came back with the upstream merge: the build before it measured 0 on the same route. Likely cause, not yet proven: since upstream's queue ordering, the wait after a frame's first submission (`submit_finish = 0x1`) no longer covers work that is held back.
+- Upstream's queue ordering (`NX2NAVI_EVENT_ORDER`) is off by default here. On our AMD test PC it made the lighting jump in the Deku Tree cutscene and brought flashes back. With it off, brightness jumps over that cutscene match the build before the merge. Upstream added it because Link and other characters drew too dark, so they may draw darker here. Set `NX2NAVI_EVENT_ORDER=1` to turn it on.
+- Mild lighting pops may remain in the Deku Tree cutscene: seen by eye once with this build at high frame rates, not found by the meter in the part it covered.
 - Falling leaves may still draw black. Not measured on this build.
 - 180 fps on screen needs 11.1 ms a real frame. This build does not reach that in the scenes above.
 - A test run dropped to about 0.1 GB of free system commit. Machines with less memory or page file may have trouble.
 - Upstream's translator patch for tree flicker (0036) is in the source, but this build runs the older translator.
-- Not checked: a 10-minute run, and whether the game clock holds above 60 real fps.
+- Not checked: a 10-minute run.
 - Only tested on the PC above. Other cards may behave differently.
 
 ## Build it
