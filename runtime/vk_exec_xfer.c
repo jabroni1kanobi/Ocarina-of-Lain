@@ -714,7 +714,9 @@ static void clear_buf(VkExec *ex, const p_clear_buf *p) {
         // A VRAM mirror's guest copy is filled too, at once: atomics through the device address table count in both
         // copies (translator patch 0036), and a counter reset here must start from the same value in both.
         VkBuffer twin = vk_mem_guest_twin(&d);
-        if (twin) vkCmdFillBuffer(ex->cb, twin, d.offset, n, p->value), ex->recorded++;
+        static int twin_fill = -1;   // off without translator patch 0036: atomics count in the mirror only
+        if (twin_fill < 0) twin_fill = rt_knob("TWIN_FILL", "0");
+        if (twin && twin_fill) vkCmdFillBuffer(ex->cb, twin, d.offset, n, p->value), ex->recorded++;
         vk_mem_gpu_wrote(&d, n);
         ex->recorded++;
         vk_mem_count(d.cls, VK_MUSE_GPU_WRITE, n);

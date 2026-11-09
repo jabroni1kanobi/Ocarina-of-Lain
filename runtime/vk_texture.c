@@ -691,14 +691,7 @@ static uint64_t n_cap_drops, n_commit_drops;
 static uint64_t released_cap_bytes(void) {
     if (!released_cap) {
         const char *s = cfg_get("NX2NAVI_TEX_RELEASED_MB");
-        long long mb;
-        if (s && *s) mb = atoll(s);
-        else {
-            float used, total, proc;
-            plat_mem_info(&used, &total, &proc);
-            mb = total > 0 ? (long long)(total / 16) : 2048;
-            mb = mb < 1024 ? 1024 : mb > 4096 ? 4096 : mb;
-        }
+        long long mb = s && *s ? atoll(s) : 0;   // no limit by default: on AMD the limit left characters and textures mushy with frame generation
         released_cap = mb > 0 ? (uint64_t)mb << 20 : UINT64_MAX;
         if (mb > 0) rt_log("vk: released textures keep at most %lld MiB of their own memory", mb);
         else rt_log("vk: released textures: no size limit");
@@ -709,7 +702,7 @@ static uint64_t released_cap_bytes(void) {
 static int commit_is_low(void) {
     if (commit_free_mb == -2) {
         const char *s = cfg_get("NX2NAVI_TEX_COMMIT_FREE_MB");
-        commit_free_mb = s && *s ? atoll(s) : -1;
+        commit_free_mb = s && *s ? atoll(s) : 0;   // off by default, as the size limit
         if (commit_free_mb < -1) commit_free_mb = -1;
         if (!plat_commit_enforced()) commit_free_mb = 0;   // a limit no allocation fails at
     }

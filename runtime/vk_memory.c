@@ -574,7 +574,7 @@ static volatile uint64_t mirror_frame;   // the frame vk_mem_census last saw, fo
 void vk_mem_census(uint64_t frame) {
     mirror_frame = frame;
     static uint64_t window_start;
-    if ((rt_trace & RT_TRACE_PERF) && frame % 600 == 0) vram_log(frame);
+    if ((rt_trace & RT_TRACE_PERF) && frame % 600 == 0 && rt_knob("VRAM_LOG", "0")) vram_log(frame);
     if ((rt_trace & RT_TRACE_PERF) && !vk_mirror_on) dirty_frame(frame);
     if ((rt_trace & RT_TRACE_PERF) ? frame % 60 == 0 : frame == 600 || frame == 1800)
         mirror_log(frame), shadow_log(frame);   // mirror_log also logs the write-watch line
