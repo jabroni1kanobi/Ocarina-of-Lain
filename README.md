@@ -35,12 +35,12 @@ Tested on one PC only: Radeon RX 9070, driver 26.10.1, at 2560x1440.
 
 Measured with FSR 3 frame generation on, so each frame above is a real frame and twice as many reach the screen. This build is merged with upstream a3246088: its Kokiri numbers are higher than our earlier 18 ms and 8 ms, which came from a build before the merge, under different settings.
 
-The flash meter found no spikes over 4,200 frames of the Deku Tree cutscene at the settings above. It reads real frames only.
+The flash meter found no spikes over 4,200 frames of the Deku Tree cutscene at the settings above. On a Kokiri save's route it found 8 small runs of spikes in 7,800 frames, about 1% of the picture: 6 at the title screen and 2 in play around frames 7270 to 7273. The build before the merge measured 0 on that route. It reads real frames only.
 
 ## Known problems
 
 - Upstream's queue ordering (`NX2NAVI_EVENT_ORDER`) is off by default here. On our AMD test PC it made the lighting jump in the Deku Tree cutscene and brought flashes back. With it off, brightness jumps over that cutscene match the build before the merge. Upstream added it because Link and other characters drew too dark, so they may draw darker here. Set `NX2NAVI_EVENT_ORDER=1` to turn it on.
-- Mild lighting pops may remain in the Deku Tree cutscene: seen by eye once with this build at high frame rates, not found by the meter in the part it covered.
+- Mild lighting pops may remain in the Deku Tree cutscene, seen by eye with this build at high frame rates. The meter finds brightness jumps near the cutscene's start. The largest in the settled part is the same size in the build before the merge, so it may belong to the scene. Not settled.
 - Falling leaves may still draw black. Not measured on this build.
 - 180 fps on screen needs 11.1 ms a real frame. This build does not reach that in the scenes above.
 - A test run dropped to about 0.1 GB of free system commit. Machines with less memory or page file may have trouble.
