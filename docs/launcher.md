@@ -164,9 +164,11 @@ it), and what to check: the date, time and time zone, or security software that 
 
 ## Uninstalling
 
-Settings > Uninstall Ocarina of Lain, or Settings > Apps > Ocarina of Lain (which runs `OcarinaOfLain.exe --uninstall`): the launcher
-folder, its toolchain, the shortcuts and the Apps entry go; the built game and its saves stay unless "Remove the
-Built Game" is On. The dump is never touched.
+Settings > Uninstall Ocarina of Lain, or Settings > Apps > Ocarina of Lain (which runs `OcarinaOfLain.exe --uninstall`): what the launcher
+put in its folder (`OcarinaOfLain.exe`, `python`, `app`, `pydeps`, `data`, `toolchain`; `launcher/winsys.py` `OWNED`), the
+toolchain in `C:\OcarinaOfLain` when it went there, the shortcuts and the Apps entry go; the launcher's folder itself goes
+only when that leaves it empty. The built game and its saves stay unless "Remove the Built Game" is On, also when the
+game folder is the default `<launcher>\game`. The dump is never touched.
 
 ## Command line
 

@@ -29,6 +29,9 @@ class Context:
             self._file = None
         self.log(f'--- Ocarina of Lain launcher {self.version} ({"checkout" if self.layout.dev else "release"}) in '
                  f'{self.layout.root}')
+        if self.settings.unreadable:
+            self.log(f'{self.layout.settings} is not valid JSON: the settings start from their defaults; the file as '
+                     'it was is kept as launcher.json.bad')
 
     def log(self, line):
         stamp = time.strftime('%H:%M:%S')

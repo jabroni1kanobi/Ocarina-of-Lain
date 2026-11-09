@@ -72,6 +72,24 @@ static void outer_size(HWND h, int cw, int ch, int *ow, int *oh) {
     *oh = r.bottom - r.top;
 }
 
+// The client size cw x ch scaled down, in its own proportions, so the whole window fits the primary monitor's work
+// area, where CW_USEDEFAULT opens it: the default 1920x1080 on a 1080p laptop put the bottom of the picture (the HUD)
+// under the taskbar and past the screen. The setting itself stays; the menu's size list offers what fits.
+static void fit_work_area(int *cw, int *ch) {
+    RECT work;
+    int ow, oh;
+    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) return;
+    outer_size(NULL, *cw, *ch, &ow, &oh);
+    int aw = (work.right - work.left) - (ow - *cw), ah = (work.bottom - work.top) - (oh - *ch);
+    if (aw <= 0 || ah <= 0 || (*cw <= aw && *ch <= ah)) return;
+    double k = (double)aw / *cw < (double)ah / *ch ? (double)aw / *cw : (double)ah / *ch;
+    int w = (int)(*cw * k) & ~1, hh = (int)(*ch * k) & ~1;
+    if (w < 640 || hh < 360) return;
+    rt_log("gfx: window %dx%d does not fit the screen's work area; opening at %dx%d", *cw, *ch, w, hh);
+    *cw = w;
+    *ch = hh;
+}
+
 // Windows turns the display off and sleeps after the idle timeout, and gamepad input does not count as activity. While
 // the window is up and not minimized it holds the display and the system on, as other games do. The state belongs to
 // the calling thread, so only the window thread (window_main and wnd_proc) calls this; the process exit releases it.
@@ -274,6 +292,12 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         return 0;
     }
+    case WM_ENDSESSION:
+        // Windows is shutting down, restarting or logging off: it ends the process after this message without a
+        // WM_CLOSE, so the close path runs here (the settings menu's pending save, RTSS's profile, a save Commit in
+        // flight); gfx_window_closed does not return
+        if (w) gfx_window_closed();
+        return 0;
     case WM_CLOSE:
         gfx_window_closed();
     case WM_ERASEBKGND:
@@ -372,6 +396,7 @@ static void window_main(void *arg) {
     RegisterClassExW(&wc);
     int cw, ch, ow, oh;
     cfg_window_size(&cw, &ch);
+    fit_work_area(&cw, &ch);
     outer_size(NULL, cw, ch, &ow, &oh);
     // The window opens behind the user's windows first and is then raised (raise_window): a game started by a frontend
     // has no other way to reach it. The game counts itself in focus until the first WM_ACTIVATEAPP, so loading goes on,
@@ -395,10 +420,12 @@ static void window_main(void *arg) {
         outer_size(g_hwnd, cw, ch, &ow, &oh);
         SetWindowPos(g_hwnd, HWND_BOTTOM, 0, 0, ow, oh, SWP_NOMOVE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         if (!background) {
+            // Pending before the raise: the activation it gets is the first WM_ACTIVATEAPP, which takes the fullscreen
+            // setting; set after it, fullscreen waited for the next activation and the game started in a window
+            g_fs_pending = cfg_fullscreen();
             raise_window(g_hwnd);   // a frontend's player may have no way to reach a window left behind
             FLASHWINFO fw = {.cbSize = sizeof fw, .hwnd = g_hwnd, .dwFlags = FLASHW_TRAY | FLASHW_TIMERNOFG};
             FlashWindowEx(&fw);
-            g_fs_pending = cfg_fullscreen();
         }
         note_applied();
         refresh_rate_update(g_hwnd, 1);
