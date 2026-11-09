@@ -30,15 +30,21 @@ Tested on one PC only: Radeon RX 9070, driver 26.10.1, at 2560x1440.
 
 | Scene | Original 0.5.0 | Ocarina of Lain |
 |---|---|---|
-| Kokiri Forest, heavy wide view | frame about 39 ms, GPU 24 ms | frame about 18 ms, GPU about 8 ms |
-| Deku Tree cutscene | GPU 31 ms | frame 16.7 ms, GPU 7.5 ms (measured before the box fix) |
+| Kokiri Forest, heavy wide view | frame about 39 ms, GPU 24 ms | frame about 22 ms, GPU about 12 ms |
+| Saria scene | not measured | frame about 15 to 18 ms, GPU about 10 ms |
 
-The flash meter found no flashes in 1,600 frames of the Deku Tree scene. In Kokiri it found only small spikes, about 1% of the picture, and the same ones appear with the box fix turned off.
+Measured with FSR 3 frame generation on, so each frame above is a real frame and twice as many reach the screen. This build is merged with upstream a3246088: its Kokiri numbers are higher than our earlier 18 ms and 8 ms, which came from a build before the merge, under different settings.
+
+The flash meter found 13 small spikes, about 1% of the picture, on frames 1591 to 1670 of a Kokiri save's route (title screen), and none in the rest of the 7,800 frames. It reads real frames only. No device faults in the runs above.
 
 ## Known problems
 
-- Falling leaves, and parts of Link at times, show a ghosting effect. Some leaves draw black.
-- Kokiri's heavy view is about 55 fps, not a locked 60. The limit there is CPU time.
+- Slight flashes came back with the upstream merge: the build before it measured 0 on the same route. Likely cause, not yet proven: since upstream's queue ordering, the wait after a frame's first submission (`submit_finish = 0x1`) no longer covers work that is held back.
+- Falling leaves may still draw black. Not measured on this build.
+- 180 fps on screen needs 11.1 ms a real frame. This build does not reach that in the scenes above.
+- A test run dropped to about 0.1 GB of free system commit. Machines with less memory or page file may have trouble.
+- Upstream's translator patch for tree flicker (0036) is in the source, but this build runs the older translator.
+- Not checked: a 10-minute run, and whether the game clock holds above 60 real fps.
 - Only tested on the PC above. Other cards may behave differently.
 
 ## Build it
