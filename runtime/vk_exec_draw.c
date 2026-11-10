@@ -1670,15 +1670,19 @@ static struct {
     uint64_t *last;                    // per entry: the log position of its newest write (catch-up writes it once, there)
     uint64_t switches, waits, catchup, written, rewrites, catch_ns, sync_ns, n_slots, n_refill, n_fresh;
     uint64_t n_by_reg, n_by_addr;      // refills whose token changed by a registration, by an address generation only
+    uint64_t t_lock, t_full, t_dirty, t_flush, t_samp, n_sync, n_full, n_dirty, n_samp;   // pool_sync_entries' time by part (ns) and counts
     uint64_t dirty_pos;                // vk_texture_dirty_slots_locked position (0: the next sync walks every slot)
     int ready, uab;
     uint32_t kinds, gen, epoch, sgen;
     int retry;                         // the last sync left slots to the creation budget
     uint64_t *tok;                     // per texture slot: vk_texture_slot_token it was filled under (0: stand-ins)
-    VkImageView *view;                 // [kind * VK_POOL_TEX + id]: what the entry holds
+    VkImageView *view;                 // [kind * VK_POOL_TEX + id] (PLV): what the entry holds
     VkSampler *samp;                   // [id]
     uint64_t writes;
 } PL;
+// A pool entry's view by kind and slot id. Kind-major: the full walk reads ids in order and only a few kinds are in use
+// (3 in Kokiri Forest), so 8 ids share a cache line per kind. Id-major (pr1) tripled pool_fill's samples (pf3).
+#define PLV(k, id) PL.view[(size_t)(k) * VK_POOL_TEX + (size_t)(id)]
 
 static VkDescriptorSetLayout pool_layout_make(void) {
     VkCtx *c = vk_ctx();
@@ -1799,7 +1803,7 @@ static void pool_write(uint32_t binding, uint32_t id, VkImageView view, VkSample
 static void pool_entry_to(VkDescriptorSet set, uint32_t e) {
     uint32_t binding = e / VK_POOL_TEX, id = e % VK_POOL_TEX;
     if (binding < VK_POOL_KINDS) {
-        VkImageView v = PL.view[(size_t)binding * VK_POOL_TEX + id];
+        VkImageView v = PLV(binding, id);
         if (v) pool_write_to(set, binding, id, v, VK_NULL_HANDLE);
     } else if (id < VK_POOL_SAMP && PL.samp[id]) {
         pool_write_to(set, binding, id, VK_NULL_HANDLE, PL.samp[id]);
@@ -1841,21 +1845,28 @@ static void pool_catch_up(uint64_t from, uint64_t to) {
     pool_flush();
     PL.switches++;
     if (PL.switches % 3600 == 0) {   // diagnosis: what invalidates the slots (vk_texture.c vk_texture_bucket_stats)
-        char bs[320];
+        char bs[640];
         vk_texture_bucket_stats(bs, sizeof bs);
         rt_log("vk: texture pool buckets over 3600 switches: %s", bs);
     }
     if (PL.switches % 3600 == 0)
         rt_log("vk: texture pool sets: %llu switches, %llu waited for the GPU, %.1f log entries and %.1f writes per "
                "catch-up, %llu whole rewrites; %.3f ms catch-up and %.3f ms entry refresh per switch (%.0f slots, %.0f "
-               "refilled: %.0f registered, %.0f address changes, %.0f shared a lookup; %.0f checked); %llu identical registrations kept",
+               "refilled: %.0f registered, %.0f address changes, %.0f shared a lookup; %.0f checked); %llu identical registrations kept; "
+               "%d view kinds in use; per switch: lock wait %.3f ms, full walk %.3f ms (%.2f), dirty walks %.3f ms (%.2f), "
+               "sampler pass %.3f ms (%.2f), descriptor flush %.3f ms, %.1f syncs, %.0f descriptor writes",
                (unsigned long long)PL.switches, (unsigned long long)PL.waits, (double)PL.catchup / (double)PL.switches,
                (double)PL.written / (double)PL.switches, (unsigned long long)PL.rewrites,
                PL.catch_ns / 1e6 / (double)PL.switches, PL.sync_ns / 1e6 / (double)PL.switches,
                (double)PL.n_slots / (double)PL.switches, (double)PL.n_refill / (double)PL.switches,
                (double)PL.n_by_reg / (double)PL.switches, (double)PL.n_by_addr / (double)PL.switches,
                (double)pool_memo_hits / (double)PL.switches,
-               (double)PL.n_fresh / (double)PL.switches, (unsigned long long)vk_texture_same_regs());
+               (double)PL.n_fresh / (double)PL.switches, (unsigned long long)vk_texture_same_regs(),
+               __builtin_popcount(PL.kinds), PL.t_lock / 1e6 / (double)PL.switches, PL.t_full / 1e6 / (double)PL.switches,
+               (double)PL.n_full / (double)PL.switches, PL.t_dirty / 1e6 / (double)PL.switches,
+               (double)PL.n_dirty / (double)PL.switches, PL.t_samp / 1e6 / (double)PL.switches,
+               (double)PL.n_samp / (double)PL.switches, PL.t_flush / 1e6 / (double)PL.switches,
+               (double)PL.n_sync / (double)PL.switches, (double)PL.writes / (double)PL.switches);
 }
 
 // Entry id of every kind in mask: the slot's view of that kind or the kind's stand-in. Texture lock held. 0: the
@@ -1913,7 +1924,7 @@ static int pool_fill(VkExec *ex, uint32_t id, uint32_t mask, uint64_t tok) {
     if (m && m->kh == kh && m->agen == ag && m->egen == vk_texture_entry_gen() && (m->mask & mask) == mask) {
         for (int k = 0; k < VK_POOL_KINDS; k++) {
             if (!(mask >> k & 1)) continue;
-            VkImageView *e = &PL.view[(size_t)k * VK_POOL_TEX + id];
+            VkImageView *e = &PLV(k, id);
             if (*e != m->view[k]) *e = m->view[k], pool_write((uint32_t)k, id, m->view[k], VK_NULL_HANDLE);
         }
         pool_memo_hits++;
@@ -1926,7 +1937,7 @@ static int pool_fill(VkExec *ex, uint32_t id, uint32_t mask, uint64_t tok) {
         VkDescriptorImageInfo ii;
         VkImage img;
         tex_info_full(ex, &r, tok ? id | 1ull << 63 : 0, 0, 1, &ii, &img);
-        VkImageView *e = &PL.view[(size_t)k * VK_POOL_TEX + id];
+        VkImageView *e = &PLV(k, id);
         if (*e != ii.imageView) *e = ii.imageView, pool_write((uint32_t)k, id, ii.imageView, VK_NULL_HANDLE);
     }
     int ok = !vk_texture_create_deferred_locked();
@@ -1934,7 +1945,7 @@ static int pool_fill(VkExec *ex, uint32_t id, uint32_t mask, uint64_t tok) {
         uint32_t eg = vk_texture_entry_gen();
         if (m->kh != kh || m->agen != ag || m->egen != eg) m->kh = kh, m->agen = ag, m->egen = eg, m->mask = 0;
         for (int k = 0; k < VK_POOL_KINDS; k++)
-            if (mask >> k & 1) m->view[k] = PL.view[(size_t)k * VK_POOL_TEX + id];
+            if (mask >> k & 1) m->view[k] = PLV(k, id);
         m->mask |= mask;
     }
     return ok;
@@ -1977,7 +1988,10 @@ static void pool_sync_entries(VkExec *ex) {
     uint32_t used = __atomic_load_n(&vk_pool_kinds_used, __ATOMIC_RELAXED);
     uint32_t gen = vk_texture_slots_gen(), ep = vk_texture_epoch(), sg = vk_sampler_gen();
     if (PL.ready && !PL.retry && used == PL.kinds && gen == PL.gen && ep == PL.epoch && sg == PL.sgen) return;
+    uint64_t ta = kern_now_ns();
     vk_texture_lock();
+    uint64_t tb = kern_now_ns();
+    PL.t_lock += tb - ta, PL.n_sync++;
     uint32_t fresh = used & ~PL.kinds;
     int n = vk_texture_slot_count_locked();
     if (n > VK_POOL_TEX) n = VK_POOL_TEX;
@@ -1998,6 +2012,9 @@ static void pool_sync_entries(VkExec *ex) {
         int walked = !fresh && ep == PL.epoch && !PL.retry && PL.dirty_pos &&
                      vk_texture_dirty_slots_locked(&PL.dirty_pos, pool_dirty_slot, &pd);
         retry = pd.retry;
+        uint64_t tw = kern_now_ns();
+        if (walked) PL.t_dirty += tw - tb, PL.n_dirty++;
+        else PL.n_full++;
         if (!walked) PL.dirty_pos = vk_texture_dirty_pos_locked();
         for (int id = 0; id < n && !walked; id++) {   // slots past n were never registered: stand-ins since the first sync
             uint64_t t = vk_texture_slot_token(id);
@@ -2014,11 +2031,13 @@ static void pool_sync_entries(VkExec *ex) {
                 vk_texture_by_id_locked(id, NULL, NULL);   // the submit's freshness check
             }
         }
-        if (!walked) PL.n_slots += (uint64_t)n;
+        if (!walked) PL.n_slots += (uint64_t)n, PL.t_full += kern_now_ns() - tw;
         vk_texture_create_budget_locked(-1);
     }
     PL.retry = retry;
+    uint64_t ts = kern_now_ns();
     if (sg != PL.sgen) {
+        PL.n_samp++;
         int ns = vk_sampler_slot_count_locked();
         for (int id = 0; id < VK_POOL_SAMP; id++) {
             VkSampler s = id < ns ? vk_sampler_by_id_locked(id) : VK_NULL_HANDLE;
@@ -2026,7 +2045,10 @@ static void pool_sync_entries(VkExec *ex) {
             if (s != PL.samp[id]) PL.samp[id] = s, pool_write(VK_POOL_KINDS, (uint32_t)id, VK_NULL_HANDLE, s);
         }
     }
+    uint64_t tf = kern_now_ns();
+    PL.t_samp += tf - ts;
     pool_flush();
+    PL.t_flush += kern_now_ns() - tf;
     vk_texture_unlock();
     PL.kinds = used, PL.gen = gen, PL.epoch = ep, PL.sgen = sg;
 }

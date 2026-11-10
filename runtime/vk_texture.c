@@ -47,6 +47,8 @@ typedef struct Tex {
     uint32_t rel_serial;          // reg_serial when it was released: slots registered before then are stale (slot_resolve)
     uint64_t rel_frame;           // gfx_counters.frames when it was released (drop_stale)
     uint32_t rel_b, rel_before, rel_after;   // the release's address bucket and its generation before / after (take-back)
+    uint8_t followed;             // some slot of another descriptor resolved to it (slot_resolve's follow): sticky
+    uint8_t rel_quiet;            // released without a bump (vk_texture_release): rel_before is the bucket's generation then
     uint32_t n_up;                // uploads of this entry (vk_texture_debug)
     int last_ch;                  // last vk_mem_changed result of make_fresh: 1 written, 0 clean, -1 not tracked
     struct Tex *next_at;          // other entries at the same storage address
@@ -131,6 +133,12 @@ static uint32_t agen[AGEN_N];
 // and the address generation index (bits 0-15), one word so a reader gets a consistent pair. Fixed-size (slot ids are
 // 20 bits), unlike tslots, which moves when it grows.
 static uint64_t *sinfo;
+// Per slot id: TexSlot.khash, dense (vk_texture_slot_khash_locked): the texture pool refresh reads it for ~20,000 slots per
+// submission, and in TexSlot each read was a cache miss of its own (pf2: 819 self samples, 2.9%; pf3 with skhash: under 0.4%).
+static uint64_t *skhash;
+// Per address bucket: registered slots whose descriptor the CPU writes (khash 0), for the quiet release rule.
+static uint32_t bucket_cpu[AGEN_N];
+static uint64_t n_quiet, n_quiet_back;   // releases and take-backs that changed no slot's resolution (no bump)
 static uint32_t reg_serial;
 static uint64_t n_same_regs;   // vk_texture_register calls that changed nothing (vk_texture_same_regs)
 
@@ -1262,8 +1270,15 @@ static Tex *entry_of(const tex_t *t) {
         n_site[1]++;
         tex_gen_bump(k.addr);
     }
-    if (e->released) {
+    if (e->released && e->rel_quiet && e->rel_b == agen_idx(k.addr) &&
+        __atomic_load_n(&agen[e->rel_b], __ATOMIC_RELAXED) == e->rel_before) {
+        // released quietly and nothing at its bucket changed since: every slot still resolves to it
         e->released = 0, nreleased--, rel_unlink(e);
+        e->rel_quiet = 0, e->rel_after = 0;
+        n_quiet_back++;
+    } else if (e->released) {
+        e->released = 0, nreleased--, rel_unlink(e);
+        e->rel_quiet = 0;
         uint32_t b = agen_idx(k.addr);
         int can = e->rel_after && b == e->rel_b && __atomic_load_n(&agen[b], __ATOMIC_RELAXED) == e->rel_after;
         n_restorable += can;
@@ -1359,6 +1374,28 @@ void vk_texture_gpu_written(const tex_t *t) {
     unlock();
 }
 
+// NX2NAVI_QUIET_RELEASE (default 1): a release that cannot change what any slot resolves to leaves its address bucket's
+// generation alone, so the texture pool does not refill the bucket's slots (up to 1,612) for nothing. Ocarina releases
+// and takes back its transient render targets every frame: 62% of the bumps in Kokiri Forest, ~20,000 pool refills per
+// submission (pr1: 2.2 ms). After a release, slot_resolve sends the slots of the entry's own descriptor to another live
+// entry at the address, or (GPU-written slots) back to the released entry itself; CPU-written slots become stale. So the
+// resolution is unchanged when: no other live entry shares the address, no CPU-written slot is registered in the bucket,
+// no slot of another descriptor ever followed this entry (followed), and the entry is not mirrored. Its take-back is
+// then quiet too, while the bucket's generation is still the one at the release (anything that changed the bucket
+// since made its slots resolve again, possibly elsewhere).
+static int quiet_release_on(void) {
+    static int on = -1;
+    if (on < 0) on = rt_knob("QUIET_RELEASE", "1");
+    return on;
+}
+
+static int release_is_quiet(const Tex *e) {
+    if (!quiet_release_on() || e->followed || e->pub.mirrored || bucket_cpu[e->rel_b]) return 0;
+    for (Tex *p = nvn_hm_get(&by_addr, &e->key.addr); p; p = p->next_at)
+        if (p != e && !p->released) return 0;
+    return 1;
+}
+
 void vk_texture_release(const tex_t *t) {
     if (!t || !t->mem) return;
     TexKey k;
@@ -1371,10 +1408,16 @@ void vk_texture_release(const tex_t *t) {
         e->rel_frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
         nreleased++;
         rel_append(e);
-        n_site[3]++;
         e->rel_b = agen_idx(k.addr), e->rel_before = agen[e->rel_b];
-        tex_gen_bump(k.addr);
-        e->rel_after = agen[e->rel_b];
+        e->rel_quiet = release_is_quiet(e);
+        if (e->rel_quiet) {
+            n_quiet++;
+            e->rel_after = 0;
+        } else {
+            n_site[3]++;
+            tex_gen_bump(k.addr);
+            e->rel_after = agen[e->rel_b];
+        }
         sweep_released();
     }
     unlock();
@@ -1409,7 +1452,8 @@ void vk_texture_register(int id, const tex_t *t, const view_t *v) {
         uint64_t *p = calloc(1 << 20, sizeof *p);
         slot_next = malloc(sizeof *slot_next << 20), slot_prev = malloc(sizeof *slot_prev << 20);
         slot_bucket = calloc(1 << 20, sizeof *slot_bucket);
-        if (!p || !slot_next || !slot_prev || !slot_bucket) rt_fatal("vk: out of memory for texture slot tokens");
+        skhash = calloc(1 << 20, sizeof *skhash);
+        if (!p || !slot_next || !slot_prev || !slot_bucket || !skhash) rt_fatal("vk: out of memory for texture slot tokens");
         for (int i = 0; i < (1 << 20); i++) slot_prev[i] = -2, slot_next[i] = -1;
         for (int i = 0; i < AGEN_N; i++) bucket_head[i] = -1;
         __atomic_store_n(&sinfo, p, __ATOMIC_RELEASE);
@@ -1425,6 +1469,7 @@ void vk_texture_register(int id, const tex_t *t, const view_t *v) {
         unlock();
         return;
     }
+    if (slot_prev[id] != -2 && !skhash[id]) bucket_cpu[slot_bucket[id]]--;   // was registered, CPU-written
     s->t = *t;
     s->used = 1;
     s->ce = NULL;
@@ -1447,13 +1492,15 @@ void vk_texture_register(int id, const tex_t *t, const view_t *v) {
         for (size_t i = 0; i < sizeof s->v; i++) h = (h ^ b[i]) * 0x100000001b3ull;
         s->khash = (h ^ s->has_view) | 1;
     }
+    skhash[id] = s->khash;
+    if (!s->khash) bucket_cpu[slot_bucket[id]]++;
     unlock();
 }
 
 // The descriptor hash of a GPU-written slot: two slots with equal hashes, the same address generation and no entry
 // created, destroyed, released or taken back between their lookups (vk_texture_entry_gen) resolve alike. 0 for an
 // unregistered or CPU-written slot (its resolution depends on when it was registered: slot_resolve's stale rule).
-uint64_t vk_texture_slot_khash_locked(int id) { return id >= 0 && id < ntslots && tslots[id].used ? tslots[id].khash : 0; }
+uint64_t vk_texture_slot_khash_locked(int id) { return skhash && id >= 0 && id < ntslots ? skhash[id] : 0; }   // 0 while unregistered (calloc)
 uint32_t vk_texture_entry_gen(void) { return tex_gen; }
 
 // The entry slot s resolves to, and the view and has_view a caller gets with it (the slot's, with the descriptor's
@@ -1504,6 +1551,7 @@ static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
         if (!e && any) e = any;
         else if (!e && !cpu_slot) e = own;
         else if (!e && own && (uint32_t)(sinfo[s - tslots] >> 16) <= own->rel_serial) stale = 1;
+        if (e && e != own) e->followed = 1;   // this entry's release can change another descriptor's slot
     }
     if (!e && s->t.mem && !stale) {
         if (create_budget < 0) e = entry_of(&s->t);
@@ -1552,12 +1600,14 @@ void vk_texture_bucket_stats(char *out, size_t n) {
             }
     uint64_t hot = 0;   // bumps weighted by the slots they invalidate
     for (int b = 0; b < AGEN_N; b++) hot += (uint64_t)bump_count[b] * occ[b];
-    snprintf(out, n, "%llu bumps (destroy %llu, create %llu, take-back %llu, release %llu), %llu slot invalidations; fullest buckets %u/%u/%u/%u slots, bumped %u/%u/%u/%u; take-backs restored %llu (could %llu)",
+    snprintf(out, n, "%llu bumps (destroy %llu, create %llu, take-back %llu, release %llu), %llu slot invalidations; fullest buckets %u/%u/%u/%u slots, bumped %u/%u/%u/%u; take-backs restored %llu (could %llu); quiet releases %llu, quiet take-backs %llu",
              (unsigned long long)n_bumps, (unsigned long long)n_site[0], (unsigned long long)n_site[1],
              (unsigned long long)n_site[2], (unsigned long long)n_site[3], (unsigned long long)hot, occ[top[0]], occ[top[1]], occ[top[2]], occ[top[3]],
              bump_count[top[0]], bump_count[top[1]], bump_count[top[2]], bump_count[top[3]],
-             (unsigned long long)n_restored, (unsigned long long)n_restorable);
+             (unsigned long long)n_restored, (unsigned long long)n_restorable, (unsigned long long)n_quiet,
+             (unsigned long long)n_quiet_back);
     n_restored = n_restorable = 0;
+    n_quiet = n_quiet_back = 0;
     n_bumps = 0;
     memset(n_site, 0, sizeof n_site);
     memset(bump_count, 0, sizeof bump_count);
