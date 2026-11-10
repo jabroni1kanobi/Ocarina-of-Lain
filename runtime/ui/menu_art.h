@@ -25,7 +25,10 @@ extern "C" void menu_art_start(void);    // decodes the textures on a worker, on
 // The texture for the menu's draw lists and its size in pixels; 0 while it is not there (still decoding, or absent).
 // Window thread: the first call for an art uploads it.
 extern "C" int menu_art(MenuArt id, ImTextureID *tex, float *w, float *h);
-extern "C" void menu_art_release(void);  // before ImGui's Vulkan back end shuts down
+extern "C" void menu_art_release(void);
+// Ocarina of Lain's menu background: lain/menu-bg.rgba next to the exe (tools/lain/make_menu_bg.py writes it from any
+// picture), read and uploaded at the first call; 0 when there is none. Window thread.
+extern "C" int menu_lain_bg(ImTextureID *tex, float *w, float *h);  // before ImGui's Vulkan back end shuts down
 // Draws an art stretched over [a, b] with a tint; 0 (nothing drawn) while it is not there.
 extern "C" int menu_art_draw(ImDrawList *dl, MenuArt id, ImVec2 a, ImVec2 b, ImU32 tint);
 // Draws an art as nine pieces: corners `corner` pixels on screen from the outer `frac` of the texture, edges stretched,

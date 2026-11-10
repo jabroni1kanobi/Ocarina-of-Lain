@@ -74,3 +74,7 @@ desktop.ini
 
 # Agent task worktrees (tools/worktree.py)
 /.worktrees/
+
+# Ocarina of Lain: the owner's own picture and video (tools/lain/make_menu_bg.py); never in the repository
+/lain/
+*.rgba

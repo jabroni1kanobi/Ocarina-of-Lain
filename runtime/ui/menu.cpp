@@ -231,8 +231,8 @@ static float menu_scale(uint32_t w, uint32_t h) {
     return (lines >= least ? lines : least) / 1080.0f;
 }
 
-// The gold of the title and its Triforce (the rest of the menu's colours: ui/menu_skin.cpp skin_style).
-static const ImVec4 kGold(0.93f, 0.76f, 0.38f, 1);
+// The lavender of the title and its Triforce (the rest of the menu's colours: ui/menu_skin.cpp skin_style).
+static const ImVec4 kGold(0.84f, 0.72f, 1.00f, 1);
 
 // The Triforce, its top at (x, y), h high, drawn with the title.
 static void triforce(ImDrawList *dl, float x, float y, float h, ImU32 col) {
@@ -1115,7 +1115,20 @@ static void menu_sounds_frame(void) {
 }
 
 static void layout_menu(uint32_t w, uint32_t h, float scale) {
-    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), ImVec2((float)w, (float)h), IM_COL32(10, 6, 2, 150));
+    // Behind everything: the owner's Lain picture (lain/menu-bg.rgba, ui/menu_art.cpp menu_lain_bg) filling the screen
+    // without stretching, under a violet veil dark enough that the rows over it stay readable; the window's own
+    // translucent panel (kNavy) darkens it further behind the text. Without the picture, the veil alone.
+    ImDrawList *bg = ImGui::GetBackgroundDrawList();
+    ImTextureID lain;
+    float iw, ih;
+    if (menu_lain_bg(&lain, &iw, &ih)) {
+        const float k = fmaxf(w / iw, h / ih), dw = iw * k, dh = ih * k;
+        const ImVec2 a(((float)w - dw) * 0.5f, ((float)h - dh) * 0.5f);
+        bg->AddImage(lain, a, ImVec2(a.x + dw, a.y + dh));
+        bg->AddRectFilled(ImVec2(0, 0), ImVec2((float)w, (float)h), IM_COL32(14, 6, 26, 110));
+    } else {
+        bg->AddRectFilled(ImVec2(0, 0), ImVec2((float)w, (float)h), IM_COL32(10, 4, 18, 165));
+    }
     float ww = fminf(w * 0.88f, 1400 * scale), wh = fminf(h * 0.86f, 820 * scale);
     ImGui::SetNextWindowPos(ImVec2(w * 0.5f, h * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(ww, wh), ImGuiCond_Always);
@@ -1137,16 +1150,27 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
         for (int turned = 0; turned < 2; turned++)
             menu_art_draw9_turned(fdl, MENU_ART_FRAME_DECO, ImVec2(win_p.x - ox, win_p.y - oy),
                                   ImVec2(win_p.x + win_s.x + ox, win_p.y + win_s.y + oy), 96 * scale, 0.2f,
-                                  IM_COL32(236, 196, 112, 235), 0, turned);
+                                  IM_COL32(196, 160, 255, 235), 0, turned);
         fdl->PopClipRect();
     }
     if (g_title_font) ImGui::PushFont(g_title_font);
     {   // the Triforce, then "Ocarina of Time" and the page title
         ImVec2 at = ImGui::GetCursorScreenPos();
         float th = ImGui::GetTextLineHeight();
+        // The top bar: a band of Lain purple across the window's top, deep at the left and fading to violet-black, with
+        // a lavender line under it; the title sits on it.
+        {
+            ImDrawList *wdl = ImGui::GetWindowDrawList();
+            const float pad = ImGui::GetStyle().WindowPadding.y, r = ImGui::GetStyle().WindowRounding;
+            const ImVec2 p0 = win_p, p1(win_p.x + win_s.x, at.y + th + pad * 0.6f);
+            wdl->AddRectFilled(p0, ImVec2(p1.x, p0.y + r * 2), IM_COL32(74, 28, 118, 235), r, ImDrawFlags_RoundCornersTop);
+            wdl->AddRectFilledMultiColor(ImVec2(p0.x, p0.y + r), p1, IM_COL32(74, 28, 118, 235), IM_COL32(26, 12, 44, 220),
+                                         IM_COL32(26, 12, 44, 220), IM_COL32(74, 28, 118, 235));
+            wdl->AddLine(ImVec2(p0.x, p1.y), p1, IM_COL32(196, 160, 255, 150), 1.5f);
+        }
         triforce(ImGui::GetWindowDrawList(), at.x + th * 0.6f, at.y + th * 0.02f, th * 0.96f, ImGui::GetColorU32(kGold));
         ImGui::SetCursorScreenPos(ImVec2(at.x + th * 1.5f, at.y));
-        ImGui::TextColored(kGold, "Ocarina of Time");
+        ImGui::TextColored(kGold, "Ocarina of Lain");
         ImGui::SameLine();
         ImGui::TextDisabled("|");
         ImGui::SameLine();

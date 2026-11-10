@@ -1,6 +1,6 @@
 """The window's pictures, drawn with numpy into RGBA arrays and handed to Tk as PNG data.
 
-Everything is drawn here from shapes and colours: the misty green backdrop, the wooden title band, the bronze label
+Everything is drawn here from shapes and colours: the violet-black backdrop, the purple title band, the purple label
 cells with their mottled texture, the description box, the white glowing cursor, the filigree divider, Navi and
 the small icons. Tk's canvas draws lines and polygons without antialiasing on Windows, so every curved or soft
 shape is a picture; flat rectangles and text stay canvas items.
@@ -18,18 +18,19 @@ import numpy as np
 # ---------------------------------------------------------------- colours
 
 PALETTE = {
-    'window': '#06180d',
-    'panel': '#3a2b22',
-    'label_top': '#7a5c32', 'label_mid': '#775930', 'label_bottom': '#72552d', 'label_border': '#6a4f29',
-    'ring': '#2a2019',
-    'value': '#2f2d22', 'value_border': '#45402f',
-    'orange': '#d69127', 'orange_light': '#e3a234', 'orange_dark': '#8f5f17',
-    'desc': '#403024', 'desc_border': '#4f3f30',
-    'text': '#e9dcc0', 'text_bright': '#f1e6cc', 'value_text': '#e3d5b6', 'desc_text': '#e9dfc8',
-    'muted': '#d4c6a6', 'dim': '#7d786a', 'off': '#5e5b51', 'on_text': '#fdf4de', 'salmon': '#e88f6c',
-    'ok': '#a7d68c', 'gold': '#e6b65a', 'band_text': '#f3ecdc', 'status': '#b9a988', 'log_text': '#cfc4ab',
-    'line': '#54442f', 'dot': '#5d4b36', 'filigree': '#7a6443', 'glow': '#e9ebee',
-    'button_hover': '#8a6c3f', 'close_hover': '#b0402c',
+    'window': '#0b0612',
+    'panel': '#2a1440',
+    'label_top': '#4d2780', 'label_mid': '#46227a', 'label_bottom': '#3a1d58', 'label_border': '#6a3fa6',
+    'ring': '#150a22',
+    'value': '#1b0e2c', 'value_border': '#3d2560',
+    'orange': '#9468d8', 'orange_light': '#c8a4ff', 'orange_dark': '#55318f',
+    'desc': '#2e1648', 'desc_border': '#4d2d7a',
+    'text': '#ece6f6', 'text_bright': '#f7f2ff', 'value_text': '#e4dbf4', 'desc_text': '#ece6f6',
+    'muted': '#c6b9de', 'dim': '#8c80a8', 'off': '#6c5f8a', 'on_text': '#f8f4ff', 'salmon': '#ff8fb0',
+    'ok': '#a5ecc8', 'gold': '#c8a4ff', 'band_text': '#f4edff', 'status': '#b9a9d9', 'log_text': '#d6cbec',
+    'line': '#4a3068', 'dot': '#5c3f84', 'filigree': '#9068c8', 'glow': '#f0e6ff',
+    'button_hover': '#6a3aa8', 'close_hover': '#b02f5e',
+    'shadow_text': '#0a0412', 'accent_dark': '#2a1440', 'chevron': '#d8c8f0', 'edge': '#06030c',
 }
 
 
@@ -341,41 +342,41 @@ FILIGREE_PATHS = (
 # ---------------------------------------------------------------- the window's pieces
 
 def backdrop(W, H, s):
-    """The whole window behind the panels: a dim misty field under a see-through dark green, darker at the sides."""
+    """The whole window behind the panels when no video plays: a dim violet field, a faint glow across the middle,
+    darker at the sides and corners."""
     img = new(H, W, PALETTE['window'], 1.0)
-    m = int(30 * s)
-    scene = new(H, W - 2 * m)
-    scene[..., :3] = vgradient(H, W - 2 * m, [(0, '#394244'), (0.36, '#414b4c'), (0.60, '#474234'), (1, '#3e3523')])
+    scene = new(H, W)
+    scene[..., :3] = vgradient(H, W, [(0, '#1c0d30'), (0.36, '#170a28'), (0.60, '#130924'), (1, '#0d0618')])
     scene[..., 3] = 1
-    over(img, scene, m, 0)
+    over(img, scene)
     band = np.zeros((H, W), dtype=np.float32)
     y0, y1 = int(250 * s), int(330 * s)
     t = (np.arange(y1 - y0) + 0.5) / max(y1 - y0, 1)
-    band[y0:y1, m:W - m] = (np.interp(t, [0, 0.55, 1], [0, 0.85, 0]))[:, None]
-    paint(img, box_blur(band, 10 * s), '#262a22')
-    over(img, hgradient_rgba(H, W, [(0, '#05180d', 0.96), (0.14, '#092615', 0.82), (0.5, '#0c2e1b', 0.72),
-                                    (0.86, '#092615', 0.82), (1, '#05180d', 0.96)]))
+    band[y0:y1, :] = (np.interp(t, [0, 0.55, 1], [0, 0.85, 0]))[:, None]
+    paint(img, box_blur(band, 10 * s), '#2e1650')
+    over(img, hgradient_rgba(H, W, [(0, '#07030f', 0.9), (0.14, '#0a0514', 0.6), (0.5, '#0e0719', 0.3),
+                                    (0.86, '#0a0514', 0.6), (1, '#07030f', 0.9)]))
     inner = rect_mask(H, W, 0, 0, W, H)
     vig = 1 - box_blur(np.pad(inner, int(45 * s), constant_values=0), 45 * s)[int(45 * s):-int(45 * s),
                                                                               int(45 * s):-int(45 * s)]
-    paint(img, np.clip(vig * 1.6, 0, 1), '#020e07', 0.6)
+    paint(img, np.clip(vig * 1.6, 0, 1), '#030108', 0.6)
     return img
 
 
 def band(w, h, s):
-    """The wooden title band, its two-line bottom edge and the shadow under it; (image, extra height below)."""
+    """The purple title band, its lavender line and the shadow under it; (image, extra height below)."""
     pad = int(14 * s)
     img = new(h + pad, w)
-    wood = vgradient(h, w, [(0, '#4c3b26'), (0.30, '#5a4529'), (0.65, '#6b5232'), (1, '#806239')])
-    wood = overlay(wood, fractal(h, w, 300 * s, 11 * s, 3, seed=9), 0.32)
-    wood = overlay(wood, fractal(h, w, 33 * s, None, 3, seed=4), 0.2)
+    plum = vgradient(h, w, [(0, '#4a1c76'), (0.45, '#31154f'), (1, '#140a22')])
+    plum = overlay(plum, fractal(h, w, 300 * s, 11 * s, 3, seed=9), 0.14)
+    plum = overlay(plum, fractal(h, w, 33 * s, None, 3, seed=4), 0.08)
     shade = rect_mask(h + pad, w, 0, 0, w, h + 4 * s)
     over(img, shadow(h + pad, w, shade, '#000000', 0.6, 16 * s, 0, 5 * s))
     top = new(h, w)
-    top[..., :3], top[..., 3] = wood, 1
+    top[..., :3], top[..., 3] = plum, 1
     over(img, top)
-    paint(img, rect_mask(h + pad, w, 0, h, w, h + 2 * s), '#2c2217')
-    paint(img, rect_mask(h + pad, w, 0, h + 2 * s, w, h + 4 * s), '#a9874f')
+    paint(img, rect_mask(h + pad, w, 0, h, w, h + 1.5 * s), PALETTE['orange_light'])
+    paint(img, rect_mask(h + pad, w, 0, h + 1.5 * s, w, h + 3 * s), '#0d0618')
     return img
 
 
@@ -424,7 +425,7 @@ def desc_box(w, h, s):
 
 
 def glow_frames(w, h, s, n=8):
-    """The selection cursor around a w x h box: a 3 px white frame 6 px outside it with a soft blue glow inside and
+    """The selection cursor around a w x h box: a 3 px pale frame 6 px outside it with a soft lavender glow inside and
     out, n frames of one breath. Returns (frames, margin) where the box sits at (margin, margin)."""
     gap, thick, spread = 6 * s, 3 * s, 16 * s
     mg = int(gap + spread)
@@ -436,8 +437,8 @@ def glow_frames(w, h, s, n=8):
     for k in range(n):
         t = 0.5 - 0.5 * np.cos(2 * np.pi * k / n)
         img = new(H, W)
-        paint(img, np.clip(soft_far * 2.2, 0, 1), '#96b4e6', 0.35 + 0.25 * t)
-        paint(img, np.clip(soft_out * 2.8, 0, 1), '#afc5e8', 0.7 + 0.3 * t)
+        paint(img, np.clip(soft_far * 2.2, 0, 1), '#a67ce8', 0.35 + 0.25 * t)
+        paint(img, np.clip(soft_out * 2.8, 0, 1), '#c8a4ff', 0.7 + 0.3 * t)
         paint(img, ring, PALETTE['glow'])
         frames.append(img)
     return frames, mg
@@ -543,10 +544,21 @@ def navi_ico():
 
 
 def title_glyph(kind, size, s):
-    """The minimise bar or the close cross of the band's buttons, in the band's light text colour."""
+    """The minimise bar, the close cross or the music note (struck through when the music is off) of the band's
+    buttons, in the band's light text colour."""
     img = new(size, size)
     t = max(1.2, 1.4 * s)
     m = size * 0.12
+    if kind in ('music', 'music_off'):
+        alpha = 1.0 if kind == 'music' else 0.5
+        head = stroke_mask(size, size, [[(size * 0.36, size * 0.76)]], size * 0.34)
+        stem = stroke_mask(size, size, [[(size * 0.50, size * 0.74), (size * 0.50, size * 0.16)]], t)
+        flag = stroke_mask(size, size, [[(size * 0.50, size * 0.16), (size * 0.84, size * 0.30),
+                                         (size * 0.84, size * 0.50)]], t)
+        paint(img, np.clip(head + stem + flag, 0, 1), PALETTE['band_text'], alpha)
+        if kind == 'music_off':
+            paint(img, stroke_mask(size, size, [[(m, size - m), (size - m, m)]], t * 1.2), PALETTE['salmon'])
+        return img
     if kind == 'min':
         lines = [[(m, size / 2), (size - m, size / 2)]]
     else:
@@ -574,12 +586,12 @@ def framed_icon(size, s, kind):
     """The square-framed icon of a big row (play or refresh), like the icon frames of the game's menu rows."""
     img = new(size, size)
     t = 1.5 * s
-    paint(img, ring_mask(size, size, 0.5, 0.5, size - 0.5, size - 0.5, t), '#e9dcc0')
+    paint(img, ring_mask(size, size, 0.5, 0.5, size - 0.5, size - 0.5, t), '#ece6f6')
     c = size / 2
     if kind == 'play':
         k = size / 32
         paint(img, polygon_mask(size, size, [(c - 5 * k, c - 7 * k), (c + 7 * k, c), (c - 5 * k, c + 7 * k)]),
-              '#efe4ca')
+              '#f4edff')
     elif kind == 'refresh':
         import math
         k = size / 32
@@ -594,19 +606,19 @@ def framed_icon(size, s, kind):
                  [(c + r * math.cos(math.radians(160)) + 3.5 * k, c + r * math.sin(math.radians(160)) + 1 * k),
                   (c + r * math.cos(math.radians(160)), c + r * math.sin(math.radians(160))),
                   (c + r * math.cos(math.radians(160)) - 0.5 * k, c + r * math.sin(math.radians(160)) + 4 * k)]]
-        paint(img, stroke_mask(size, size, arcs + heads, 2.2 * k), '#efe4ca')
+        paint(img, stroke_mask(size, size, arcs + heads, 2.2 * k), '#f4edff')
     return img
 
 
 def badge(size, s):
-    """The orange "!" disc beside Updates when a new version is ready (the "!" itself is text)."""
+    """The lavender "!" disc beside Updates when a new version is ready (the "!" itself is text)."""
     img = new(size + 4, size + 4)
     ring = stroke_mask(size + 4, size + 4, [[((size + 4) / 2, (size + 4) / 2)]], size + 1.5 * s)
-    over(img, shadow(size + 4, size + 4, ring, '#fbbd45', 0.6, 6 * s))
-    paint(img, ring, '#3a2a14')
+    over(img, shadow(size + 4, size + 4, ring, '#c8a4ff', 0.6, 6 * s))
+    paint(img, ring, '#2a1440')
     disc = stroke_mask(size + 4, size + 4, [[((size + 4) / 2, (size + 4) / 2)]], size)
     layer = new(size + 4, size + 4)
-    layer[..., :3] = vgradient(size + 4, size + 4, [(0, '#fbbd45'), (1, '#e2942a')])
+    layer[..., :3] = vgradient(size + 4, size + 4, [(0, '#d6b8ff'), (1, '#9468d8')])
     layer[..., 3] = disc
     over(img, layer)
     return img

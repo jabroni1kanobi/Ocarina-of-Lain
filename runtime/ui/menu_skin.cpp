@@ -64,10 +64,11 @@ void ornament_line(ImDrawList *dl, ImVec2 a, ImVec2 b, float inset, float s, ImU
 }
 
 
-// The settings menu's colours: a dark umber panel, warm browns for frames and what is selected, gold for the ornaments,
-// accents and the cursor, parchment text. kGreen and kOcarina keep their names for the selected and active controls.
-const ImVec4 kGold(0.93f, 0.76f, 0.38f, 1), kGreen(0.36f, 0.26f, 0.13f, 1), kNavy(0.075f, 0.058f, 0.042f, 0.95f),
-    kOcarina(0.62f, 0.47f, 0.22f, 1);
+// The settings menu's colours, Ocarina of Lain's: a near-black violet panel that lets the Wired show through (menu.cpp
+// layout_menu draws lain/menu-bg.rgba behind it), deep purples for frames and what is selected, lavender for the
+// ornaments, accents and the cursor (kGold keeps its name), pale lavender text. kGreen and kOcarina keep their names for the selected and active controls.
+const ImVec4 kGold(0.78f, 0.64f, 1.00f, 1), kGreen(0.30f, 0.15f, 0.44f, 1), kNavy(0.050f, 0.032f, 0.080f, 0.84f),
+    kOcarina(0.52f, 0.30f, 0.78f, 1);
 
 // Where the art's boxes lie in its textures, in texels (measured from the textures). The button's layers are 489 x 133
 // with the button's box from (20, 19) to (469, 114); the cursor's are 640 x 173 and its box, the button it surrounds,
@@ -209,27 +210,27 @@ void skin_style(ImGuiStyle &s) {
     c[ImGuiCol_Border] = ImVec4(kGold.x, kGold.y, kGold.z, 0.55f);
     c[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
     c[ImGuiCol_PopupBg] = kNavy;
-    c[ImGuiCol_Text] = ImVec4(0.96f, 0.92f, 0.82f, 1);
-    c[ImGuiCol_TextDisabled] = ImVec4(0.62f, 0.56f, 0.46f, 1);
-    c[ImGuiCol_FrameBg] = ImVec4(0.15f, 0.115f, 0.08f, 1);
-    c[ImGuiCol_FrameBgHovered] = ImVec4(0.24f, 0.18f, 0.10f, 1);
+    c[ImGuiCol_Text] = ImVec4(0.93f, 0.91f, 0.97f, 1);
+    c[ImGuiCol_TextDisabled] = ImVec4(0.62f, 0.56f, 0.72f, 1);
+    c[ImGuiCol_FrameBg] = ImVec4(0.12f, 0.07f, 0.18f, 1);
+    c[ImGuiCol_FrameBgHovered] = ImVec4(0.20f, 0.11f, 0.30f, 1);
     c[ImGuiCol_FrameBgActive] = kGreen;
     c[ImGuiCol_SliderGrab] = kOcarina;
     c[ImGuiCol_SliderGrabActive] = kGold;
     c[ImGuiCol_CheckMark] = kGold;
-    c[ImGuiCol_Button] = ImVec4(0.19f, 0.145f, 0.09f, 1);
+    c[ImGuiCol_Button] = ImVec4(0.15f, 0.09f, 0.22f, 1);
     c[ImGuiCol_ButtonHovered] = kGreen;
     c[ImGuiCol_ButtonActive] = kOcarina;
-    c[ImGuiCol_Header] = ImVec4(0.24f, 0.18f, 0.10f, 1);
+    c[ImGuiCol_Header] = ImVec4(0.20f, 0.11f, 0.30f, 1);
     c[ImGuiCol_HeaderHovered] = kGreen;
     c[ImGuiCol_HeaderActive] = kOcarina;
-    c[ImGuiCol_Tab] = ImVec4(0.13f, 0.10f, 0.07f, 1);
+    c[ImGuiCol_Tab] = ImVec4(0.10f, 0.06f, 0.15f, 1);
     c[ImGuiCol_TabHovered] = kGreen;
-    c[ImGuiCol_TabSelected] = ImVec4(0.42f, 0.31f, 0.15f, 1);
+    c[ImGuiCol_TabSelected] = ImVec4(0.34f, 0.17f, 0.50f, 1);
     c[ImGuiCol_TabSelectedOverline] = kGold;
     c[ImGuiCol_NavCursor] = kGold;
     c[ImGuiCol_Separator] = ImVec4(kGold.x, kGold.y, kGold.z, 0.30f);
-    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.36f, 0.28f, 0.16f, 1);
+    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.30f, 0.18f, 0.42f, 1);
     c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0.2f);
 }
 

@@ -6,6 +6,7 @@
 #include <atomic>
 #include <math.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "imgui.h"
@@ -166,9 +167,48 @@ extern "C" int menu_art(MenuArt id, ImTextureID *tex, float *w, float *h) {
     return 1;
 }
 
+// lain/menu-bg.rgba: "LAIN", then width and height (little-endian 32-bit), then width * height RGBA bytes. The picture is
+// the owner's own and stays out of the repository; without the file the menu keeps its plain veil.
+static Art g_lain;
+static int g_lain_tried;
+
+extern "C" int menu_lain_bg(ImTextureID *tex, float *w, float *h) {
+    if (!g_lain_tried) {
+        g_lain_tried = 1;
+        char path[PLAT_PATH_MAX * 2];
+        int n = plat_exe_path(path, sizeof path);
+        char *cut = n && n < (int)sizeof path ? plat_last_sep(path) : nullptr;
+        if (cut) {
+            snprintf(cut, sizeof path - (size_t)(cut - path), "/lain/menu-bg.rgba");
+            FILE *f = fopen(path, "rb");
+            uint32_t hd[3] = {};
+            if (f && fread(hd, 4, 3, f) == 3 && !memcmp(hd, "LAIN", 4) && hd[1] && hd[2] && hd[1] <= 8192 && hd[2] <= 8192) {
+                size_t bytes = (size_t)hd[1] * hd[2] * 4;
+                g_lain.rgba = (uint8_t *)malloc(bytes);
+                if (g_lain.rgba && fread(g_lain.rgba, 1, bytes, f) == bytes) g_lain.w = hd[1], g_lain.h = hd[2];
+                else free(g_lain.rgba), g_lain.rgba = nullptr;
+            }
+            if (f) fclose(f);
+            rt_log("menu: Lain background %s: %s", path, g_lain.rgba ? "loaded" : "none");
+        }
+    }
+    if (!g_lain.rgba) return 0;
+    if (!g_lain.ds && !g_lain.failed && !upload(g_lain)) g_lain.failed = 1;
+    if (!g_lain.ds) return 0;
+    *tex = (ImTextureID)g_lain.ds;
+    if (w) *w = (float)g_lain.w;
+    if (h) *h = (float)g_lain.h;
+    return 1;
+}
+
 extern "C" void menu_art_release(void) {
     VkCtx *c = vk_ctx();
     if (!c) return;
+    if (g_lain.ds) ImGui_ImplVulkan_RemoveTexture(g_lain.ds);
+    if (g_lain.view) vkDestroyImageView(c->device, g_lain.view, nullptr);
+    if (g_lain.img) vmaDestroyImage(c->vma, g_lain.img, g_lain.alloc);
+    g_lain.ds = VK_NULL_HANDLE, g_lain.view = VK_NULL_HANDLE, g_lain.img = VK_NULL_HANDLE, g_lain.alloc = nullptr;
+    g_lain.failed = 0;
     for (Art &a : g_art) {
         if (a.ds) ImGui_ImplVulkan_RemoveTexture(a.ds);
         if (a.view) vkDestroyImageView(c->device, a.view, nullptr);

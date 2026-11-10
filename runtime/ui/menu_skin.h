@@ -55,6 +55,6 @@ bool skin_widget_button(const char *label, ImVec2 size, float s);
 bool skin_tab_item(const char *id, const char *text, int flags, float s, ImFont *font);
 
 // The colours the boxes are drawn in, for text on them.
-#define SKIN_TEXT IM_COL32(244, 236, 214, 255)       // labels on a button
-#define SKIN_TEXT_DIM IM_COL32(206, 188, 150, 255)   // notes on a button
-#define SKIN_GOLD IM_COL32(236, 196, 104, 255)       // headings and accents
+#define SKIN_TEXT IM_COL32(238, 232, 248, 255)       // labels on a button
+#define SKIN_TEXT_DIM IM_COL32(186, 172, 214, 255)   // notes on a button
+#define SKIN_GOLD IM_COL32(200, 164, 255, 255)       // headings and accents

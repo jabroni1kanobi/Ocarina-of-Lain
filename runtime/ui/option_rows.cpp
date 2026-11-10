@@ -253,7 +253,7 @@ static int row_text(const char *key, const char *label, const char *desc, const 
         const char *t = v.note ? v.note : menu_text(UI_MENU_DEFAULT_MARK);
         float tw = fminf(font->CalcTextSizeA(small, FLT_MAX, 0, t).x, cap);
         ImVec4 nclip(right - tw, p.y, right, p.y + h);
-        dl->AddText(font, small, ImVec2(right - tw, ny), v.note ? IM_COL32(250, 206, 130, 255) : SKIN_TEXT_DIM, t, NULL, 0,
+        dl->AddText(font, small, ImVec2(right - tw, ny), v.note ? IM_COL32(222, 190, 255, 255) : SKIN_TEXT_DIM, t, NULL, 0,
                     &nclip);
         if (tw > 0) note_right = right - tw - fs * 0.6f;
     }
@@ -266,7 +266,7 @@ static int row_text(const char *key, const char *label, const char *desc, const 
                                      : NULL;
     ImVec4 note_clip(p.x, p.y, note_right, p.y + h);
     if (note)
-        dl->AddText(font, small, ImVec2(p.x + pad, ny), off ? IM_COL32(200, 150, 90, 255) : SKIN_TEXT_DIM, note, NULL, 0,
+        dl->AddText(font, small, ImVec2(p.x + pad, ny), off ? IM_COL32(176, 132, 206, 255) : SKIN_TEXT_DIM, note, NULL, 0,
                     &note_clip);
     ImGui::PopID();
     return off ? 0 : step;

@@ -1,6 +1,6 @@
-"""The launcher's window, laid out like the game's options menu (docs/launcher.md, "Look"): a wooden title band with
+"""The launcher's window, laid out like the game's options menu (docs/launcher.md, "Look"): a purple title band with
 Navi and the name in the game's Cetra Display across the whole top (the window's own title bar: drag it to move the
-window, minimise and close at its right end), a list of rows on the left (a bronze label cell and a dark value cell each), a white
+window, minimise and close at its right end), a list of rows on the left (a purple label cell and a dark value cell each), a pale
 glowing cursor on the selected row, filigree dividers between groups and a description box on the right that
 explains the selected row.
 
@@ -29,10 +29,12 @@ from tkinter import filedialog
 from .. import NAME, build, feed, gamefiles, jobs, saves, versions, winsys
 from ..context import Context
 from . import art
+from .lain_bg import LainBackground
 
 W, H = 1000, 640
 BAND = (0, 1000, 56)            # x0, x1, height: the whole top of the window, which is also its title bar
 TITLE_BUTTONS = (('min', 908, 954), ('close', 954, 1000))   # x ranges on the band
+MUSIC_BUTTON = ('music', 862, 908)   # left of them, there only when the song is
 PANEL = (112, 60, 580)          # x0, top, x1
 ROWS = (140, 552, 96)           # x0, x1, top
 LABEL_W = 222                   # 54 % of the row
@@ -118,6 +120,7 @@ class App:
         self.tb_hover = None
         self.drag = None
         self.ico = None
+        self.lain = None
 
         root.title(NAME)
         root.resizable(False, False)
@@ -127,7 +130,12 @@ class App:
         self.canvas.pack()
         self.set_icon()
         self.load_fonts()
+        if not args.selftest:   # the self-test draws still pictures and must stay silent
+            self.lain = LainBackground(root, self.canvas, self.layout, self.settings, (self.X(W), self.X(H)),
+                                       self.ctx.log, self.lain_failed)
         self.draw_static()
+        if self.lain:
+            self.lain.start()
         self.bind_input()
         self.start()
         self.root.after(80, self.animate)
@@ -254,8 +262,9 @@ class App:
     def draw_static(self):
         c, s = self.canvas, self.s
         c.delete('static')
-        c.create_image(0, 0, anchor='nw', image=self.sprite('backdrop', lambda: art.backdrop(self.X(W), self.X(H), s)),
-                       tags='static')
+        if not (self.lain and self.lain.live):   # the video is the backdrop while it plays
+            c.create_image(0, 0, anchor='nw',
+                           image=self.sprite('backdrop', lambda: art.backdrop(self.X(W), self.X(H), s)), tags='static')
         bx0, bx1, bh = BAND
         px0, ptop, px1 = PANEL
         c.create_image(self.X(px0), self.X(ptop), anchor='nw', tags='static',
@@ -270,31 +279,42 @@ class App:
         x = self.X(W / 2) - (ew + gap + title_w) // 2
         c.create_image(x, self.X(bh / 2), anchor='w', image=emblem, tags='static')
         tx = x + ew + gap
-        c.create_text(tx + 1, self.X(bh / 2) + self.X(2), text=NAME, anchor='w', font=self.f['band'], fill='#1a120a',
+        c.create_text(tx + 1, self.X(bh / 2) + self.X(2), text=NAME, anchor='w', font=self.f['band'], fill=P['shadow_text'],
                       tags='static')
         c.create_text(tx, self.X(bh / 2), text=NAME, anchor='w', font=self.f['band'], fill=P['band_text'],
                       tags='static')
-        c.create_rectangle(0, 0, self.X(W) - 1, self.X(H) - 1, outline='#140e09', tags='static')
+        c.create_rectangle(0, 0, self.X(W) - 1, self.X(H) - 1, outline=P['edge'], tags='static')
         c.tag_lower('static')
+        if self.lain:
+            self.lain.lower()
         self.draw_title_buttons()
 
+    def lain_failed(self):
+        """The video stopped for good: the still backdrop comes back and the music button goes."""
+        self.draw_static()
+
+    def title_buttons(self):
+        return ((MUSIC_BUTTON,) if self.lain and self.lain.live and self.lain.has_song else ()) + TITLE_BUTTONS
+
     def draw_title_buttons(self):
-        """Minimise and close at the band's right end, lit when the mouse is over them."""
+        """The music note, minimise and close at the band's right end, lit when the mouse is over them."""
         c, X = self.canvas, self.X
         c.delete('tb')
         bh = X(BAND[2])
-        for kind, x0, x1 in TITLE_BUTTONS:
+        for kind, x0, x1 in self.title_buttons():
             if self.tb_hover == kind:
                 c.create_rectangle(X(x0), 0, X(x1), bh - 1, outline='', tags='tb',
                                    fill=P['close_hover'] if kind == 'close' else P['button_hover'])
-            size = X(12)
+            if kind == 'music' and not self.lain.music_on:
+                kind = 'music_off'
+            size = X(12) if kind in ('min', 'close') else X(18)
             glyph = self.sprite(('glyph', kind, size), lambda kd=kind: art.title_glyph(kd, size, self.s))
             c.create_image((X(x0) + X(x1)) // 2, bh // 2, image=glyph, tags='tb')
 
     def title_button_at(self, x, y):
         if y >= self.X(BAND[2]):
             return None
-        for kind, x0, x1 in TITLE_BUTTONS:
+        for kind, x0, x1 in self.title_buttons():
             if self.X(x0) <= x < self.X(x1):
                 return kind
         return None
@@ -429,6 +449,10 @@ class App:
             self.set_tb_hover(None)
             winsys.minimize(self.root)
             return
+        if kind == 'music':
+            self.lain.toggle_music()
+            self.draw_title_buttons()
+            return
         if e.y < self.X(BAND[2]):   # the band moves the window, like a title bar
             if not winsys.start_drag(self.root):
                 self.drag = (e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y())
@@ -458,6 +482,8 @@ class App:
     def on_close(self):
         if self.job and self.job.result is None:
             self.job.cancel()
+        if self.lain:
+            self.lain.stop()
         self.root.destroy()
 
     # ---------------------------------------------------------------- screens
@@ -780,6 +806,8 @@ class App:
             self.render()
             return
         self.ctx.log(f'play: {exe}')
+        if self.lain:
+            self.lain.pause()   # the game has its own picture and music
         if self.settings.get('hide_while_playing'):
             self.root.withdraw()
         self.root.after(1000, self.watch_game)
@@ -790,6 +818,8 @@ class App:
             return
         code = self.game_proc.returncode if self.game_proc else 0
         self.game_proc = None
+        if self.lain:
+            self.lain.resume()
         self.root.deiconify()
         self.root.lift()
         if code not in (0, None):
@@ -1104,7 +1134,7 @@ class App:
     def text(self, x, y, text, font, fill, anchor='w', shadow=True, width=0):
         c = self.canvas
         if shadow:
-            c.create_text(x + 1, y + 1, text=text, font=font, fill='#2a1e10', anchor=anchor, tags='dyn',
+            c.create_text(x + 1, y + 1, text=text, font=font, fill=P['shadow_text'], anchor=anchor, tags='dyn',
                           width=width)
         return c.create_text(x, y, text=text, font=font, fill=fill, anchor=anchor, tags='dyn', width=width)
 
@@ -1151,7 +1181,7 @@ class App:
             size = X(22)
             b = self.sprite(('badge', size), lambda: art.badge(size, s))
             c.create_image(bx, (y0 + y1) // 2, anchor='w', image=b, tags='dyn')
-            c.create_text(bx + (size + 4) // 2, (y0 + y1) // 2, text='!', font=self.f['badge'], fill='#3a2208',
+            c.create_text(bx + (size + 4) // 2, (y0 + y1) // 2, text='!', font=self.f['badge'], fill=P['accent_dark'],
                           tags='dyn')
         vx0 = lx1
         r.value_rect = (vx0, y0, x1, y1)
@@ -1183,7 +1213,7 @@ class App:
             fw = int((ix1 - ix0) * max(0.0, min(1.0, r.fraction)))
             if fw > 2:
                 self.orange(ix0, iy0, ix0 + fw, iy1)
-            self.canvas.create_text(cx + 1, cy + 1, text=r.value, font=vfont, fill='#1a120a', tags='dyn')
+            self.canvas.create_text(cx + 1, cy + 1, text=r.value, font=vfont, fill=P['shadow_text'], tags='dyn')
             self.canvas.create_text(cx, cy, text=r.value, font=vfont, fill=P['on_text'], tags='dyn')
         elif r.style == 'orange_arrow':
             self.orange(ix0, iy0, ix1, iy1)
@@ -1196,7 +1226,7 @@ class App:
             c.create_image(sx + label_w + X(10), cy, anchor='w', image=img, tags='dyn')
         elif r.style == 'arrow':
             cw, ch = X(9), X(12)
-            img = self.sprite(('chev', cw, ch, False, 'dim'), lambda: art.chevron(cw, ch, '#d9ccae'))
+            img = self.sprite(('chev', cw, ch, False, 'dim'), lambda: art.chevron(cw, ch, P['chevron']))
             c.create_image(x1 - X(16), cy, anchor='e', image=img, tags='dyn')
             if r.value:   # a value, centred in the cell's room left of the arrow
                 right = x1 - X(16) - cw - X(10)
@@ -1324,7 +1354,7 @@ class App:
                 y += X(22)
             elif kind == 'bullet':
                 (text,) = args
-                c.create_rectangle(x0 + padx + X(1), y + X(8), x0 + padx + X(6), y + X(13), fill='#c99a45',
+                c.create_rectangle(x0 + padx + X(1), y + X(8), x0 + padx + X(6), y + X(13), fill=P['orange_light'],
                                    outline='', tags=('dyn', 'desc'))
                 tid = c.create_text(x0 + padx + X(16), y, text=text, font=self.f['value'], fill=P['desc_text'],
                                     anchor='nw', width=inner - X(16), tags=('dyn', 'desc'))
