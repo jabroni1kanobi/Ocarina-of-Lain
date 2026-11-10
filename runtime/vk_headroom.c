@@ -14,6 +14,14 @@
 // its VRAM mirror (vk_memory.c), so while use plus two blocks passes 85% of the budget the anchor goes and nothing new
 // is allocated.
 // NX2NAVI_VRAM_HEADROOM=0 turns it off.
+// NX2NAVI_VRAM_HEADROOM_BLOCKS=<n> (1-8, default 1 = the above): keep n half blocks of free room per memory type, with up
+// to n anchors. A scene cut that makes thousands of textures at once (the intro's Deku Tree cut: 3,544 new textures in
+// one frame, lab pfi4) outran one half block: the render thread allocated new blocks and VMA freed and remade empty ones
+// in that frame (vkAllocateMemory and VmaDeviceMemoryBlock::Destroy 67 of its samples). The pressure rule scales: room
+// for n + 1 blocks under 85 % of the budget, else the anchors go.
+
+#include <stdlib.h>
+#include <string.h>
 
 #include "cfg.h"
 #include "host.h"
@@ -32,7 +40,9 @@ static struct {
     volatile int64_t types;    // memory types a thread other than this one allocated device memory of
     volatile int64_t made;     // blocks this thread brought in
     volatile int64_t other;    // device memory of 32 MiB or more other threads allocated (VMA blocks, large dedicated)
-    VmaAllocation anchor[64]; // per memory type: the half block that keeps the newest spare block from being deleted
+    VmaAllocation anchor[64][8]; // per memory type: half blocks that keep the newest spare blocks from being deleted,
+    int nanchor[64];             // oldest first
+    int want;                    // NX2NAVI_VRAM_HEADROOM_BLOCKS
 } H;
 
 static void VKAPI_PTR on_allocate(VmaAllocator a, uint32_t type, VkDeviceMemory m, VkDeviceSize size, void *user) {
@@ -51,6 +61,10 @@ const VmaDeviceMemoryCallbacks *vk_headroom_callbacks(void) {
     static const VmaDeviceMemoryCallbacks cb = {.pfnAllocate = on_allocate};
     const char *v = cfg_get("NX2NAVI_VRAM_HEADROOM");   // empty is unset: the key has no settings row for cfg_bool
     H.on = !v || !*v || cfg_bool("NX2NAVI_VRAM_HEADROOM");
+    const char *n = cfg_get("NX2NAVI_VRAM_HEADROOM_BLOCKS");
+    H.want = n && *n ? atoi(n) : 1;
+    if (H.want < 1) H.want = 1;
+    if (H.want > 8) H.want = 8;
     return H.on ? &cb : NULL;
 }
 
@@ -59,39 +73,53 @@ static VkDeviceSize block_size(const VkCtx *c, uint32_t type) {
     return heap <= HR_SMALL_HEAP ? heap / 8 : 256ull << 20;   // VMA's default preferredLargeHeapBlockSize
 }
 
-static int room(const VkCtx *c, uint32_t type, VkDeviceSize block) {
+static int room(const VkCtx *c, uint32_t type, VkDeviceSize block, int blocks) {
     VmaBudget b[VK_MAX_MEMORY_HEAPS];
     vmaGetHeapBudgets(c->vma, b);
     const VmaBudget *h = &b[c->mem_props.memoryTypes[type].heapIndex];
-    return h->budget && h->usage + 2 * block <= h->budget / 100 * 85;
+    return h->budget && h->usage + (VkDeviceSize)(blocks + 1) * block <= h->budget / 100 * 85;
+}
+
+static void drop_oldest(const VkCtx *c, uint32_t type) {
+    if (!H.nanchor[type]) return;
+    vmaFreeMemory(c->vma, H.anchor[type][0]);
+    memmove(&H.anchor[type][0], &H.anchor[type][1], sizeof H.anchor[type][0] * (size_t)--H.nanchor[type]);
 }
 
 static void drop_anchor(const VkCtx *c, uint32_t type) {
-    if (H.anchor[type]) vmaFreeMemory(c->vma, H.anchor[type]);
-    H.anchor[type] = NULL;
+    while (H.nanchor[type]) drop_oldest(c, type);
 }
 
 static void top_up(const VkCtx *c, uint32_t type) {
     VkDeviceSize block = block_size(c, type);
-    if (!room(c, type, block)) {
+    if (!room(c, type, block, 1)) {
         drop_anchor(c, type);
         return;
     }
     VkMemoryRequirements req = {.size = block / 2, .alignment = 256, .memoryTypeBits = 1u << type};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_UNKNOWN};
-    VmaAllocation a;
-    int64_t before = H.made;
-    if (vmaAllocateMemory(c->vma, &req, &ai, &a, NULL) != VK_SUCCESS) return;
-    if (H.made == before) {   // there was room
-        vmaFreeMemory(c->vma, a);
-        return;
+    // up to `want` half blocks of free room: probes that land in room already there are held until the loop ends (so
+    // each next probe looks for more room) and then freed; probes that made a block stay as its anchor
+    VmaAllocation probe[8];
+    int np = 0, made = 0;
+    for (int k = 0; k < H.want && (k == 0 || room(c, type, block, k + 1)); k++) {
+        VmaAllocation a;
+        int64_t before = H.made;
+        if (vmaAllocateMemory(c->vma, &req, &ai, &a, NULL) != VK_SUCCESS) break;
+        if (H.made == before) {
+            probe[np++] = a;
+            continue;
+        }
+        made++;
+        if (H.nanchor[type] == H.want) drop_oldest(c, type);
+        H.anchor[type][H.nanchor[type]++] = a;
     }
-    drop_anchor(c, type);
-    H.anchor[type] = a;
+    for (int i = 0; i < np; i++) vmaFreeMemory(c->vma, probe[i]);
     static volatile int32_t logged;
-    if (plat_inc32(&logged) <= 32)
-        rt_log("vk: headroom: a %.0f MiB block of memory type %u allocated ahead (%lld so far; %lld allocations of 32 MiB "
-               "or more on other threads)", (double)block / 1048576.0, type, (long long)H.made, (long long)H.other);
+    if (made && plat_inc32(&logged) <= 32)
+        rt_log("vk: headroom: %d %.0f MiB block(s) of memory type %u allocated ahead (%lld so far; %lld allocations of "
+               "32 MiB or more on other threads; %d anchors kept)", made, (double)block / 1048576.0, type,
+               (long long)H.made, (long long)H.other, H.nanchor[type]);
 }
 
 static void headroom_main(void *arg) {
