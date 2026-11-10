@@ -975,6 +975,8 @@ def step_compile(out, cache_dir, msys, jobs, romfs_job=None):
     copy_if_changed(gen / 'romfs-index.bin', out / 'romfs-index.bin')
     for name in ('nx2navi_xlate.exe', 'nx2navi_xlate.id'):
         copy_if_changed(KIT / 'bin' / name, out / name)
+    if (KIT / 'assets' / 'pipeline-keys-seed.bin').is_file():   # shipped pipeline keys (runtime/vk_pipeline.c keys_seed)
+        copy_if_changed(KIT / 'assets' / 'pipeline-keys-seed.bin', out / 'pipeline-keys-seed.bin')
     if (KIT / 'bin' / 'amd_fidelityfx_vk.dll').is_file():   # FSR 3.1 (runtime/vk_ffx.cpp)
         copy_if_changed(KIT / 'bin' / 'amd_fidelityfx_vk.dll', out / 'amd_fidelityfx_vk.dll')
     say(f'  {EXE_NAME} {exe.stat().st_size / 1e6:.0f} MB; beside it: {", ".join(copy_dlls(exe, msys / "bin", out))}')

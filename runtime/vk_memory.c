@@ -1546,7 +1546,8 @@ int vk_mem_mirror_probe(uint64_t addr) {
 #define SNAP_CHUNK (1u << 20)
 #define MERGE_SPAN (64ull << 20)   // the bytes of one pool a merge dispatch binds at most
 #define MERGE_WORDS (65535u * 64u) // the words one merge dispatch covers at most
-#define MERGE_MAX (4ull << 20)     // larger written ranges stay plain copies
+#define MERGE_MAX (4ull << 20)     // larger written ranges stay plain copies (default; NX2NAVI_WB_MERGE_MAX in MiB)
+#define MERGE_PIECE (15ull << 20)  // a merged range above this is split, so one dispatch stays within MERGE_WORDS (16 MiB - 256 B)
 typedef struct { PoolRec *r; uint64_t off, size, soff; int chunk; } SnapRange;
 typedef struct { VkBuffer buf; VmaAllocation alloc; uint64_t size, used; int host; } SnapChunk;
 typedef struct { int n; SnapChunk c[]; } SnapFree;   // a submission's chunks and range lists, pooled at its fence
@@ -1559,7 +1560,7 @@ static int nchunks, cchunks;
 // thread. Chunk sizes are powers of two so that one fits the next request; what the pool cannot hold is destroyed.
 #define SNAP_LIST_MIN (64u << 10)
 #define SNAP_POOL_N 32
-#define SNAP_POOL_BYTES (16ull << 20)
+#define SNAP_POOL_BYTES (16ull << 20)   // with NX2NAVI_WB_MERGE_MAX above 4: 256 MiB (snap_pool_cap)
 static PlatMutex snap_pool_lock = PLAT_MUTEX_INIT;
 static SnapChunk snap_pool[SNAP_POOL_N];
 static int nsnap_pool;
@@ -1572,6 +1573,22 @@ static struct {
     VkPipelineLayout layout;
     VkPipeline pipe;
 } WM;
+
+// NX2NAVI_WB_MERGE_MAX: the largest shader-written range (MiB) that goes through the merge instead of a plain copy.
+// Kokiri (wb1): the plain write-back is ~46 MB a frame, all shader-written storage ranges of 4-23 MB (Hookshot #1109
+// copies back only changed bytes for the same reason). Above 4, the snapshot pool keeps 256 MiB of chunks so the
+// large snapshots are reused rather than allocated per submission.
+static uint64_t merge_max(void) {
+    static uint64_t v;
+    if (!v) {
+        const char *e = cfg_get("NX2NAVI_WB_MERGE_MAX");
+        long mb = e && *e ? strtol(e, NULL, 10) : 4;
+        v = (uint64_t)(mb < 1 ? 1 : mb > 512 ? 512 : mb) << 20;
+        if (v != MERGE_MAX) rt_log("mem: write-back merge takes shader-written ranges up to %llu MiB", (unsigned long long)(v >> 20));
+    }
+    return v;
+}
+static uint64_t snap_pool_cap(void) { return merge_max() > MERGE_MAX ? 256ull << 20 : SNAP_POOL_BYTES; }
 
 static int merge_init(VkCtx *c) {
     WM.tried = 1;
@@ -1749,7 +1766,7 @@ static void snap_free(void *arg) {   // completion thread: the submission is don
     plat_mutex_lock(&snap_pool_lock);
     for (int i = 0; i < f->n; i++) {
         SnapChunk *ch = &f->c[i];
-        if (nsnap_pool == SNAP_POOL_N || snap_pool_bytes + ch->size > SNAP_POOL_BYTES) continue;
+        if (nsnap_pool == SNAP_POOL_N || snap_pool_bytes + ch->size > snap_pool_cap()) continue;
         snap_pool[nsnap_pool++] = *ch;
         snap_pool_bytes += ch->size;
         ch->buf = VK_NULL_HANDLE;
@@ -1760,17 +1777,53 @@ static void snap_free(void *arg) {   // completion thread: the submission is don
     free(f);
 }
 
-static void gpu_wrote(const VkMemSpan *sp, uint64_t size, int shader) {
+// NX2NAVI_LOG_WB=1: the plain write-back copies by call site and GPU address, summed between mirror stats lines (which
+// ones make the per-frame write-back bytes). Off: one branch per GPU write.
+#define WBS_N 64
+static struct { uintptr_t site; uint64_t gpu, bytes, n; int shader; } wbs[WBS_N];
+static int nwbs, wbs_on = -1;
+static uint64_t wbs_lost;
+
+static void wbs_note(uintptr_t site, const PoolRec *r, uint64_t off, uint64_t size, int shader) {
+    uint64_t gpu = r->lo + off;
+    plat_mutex_lock(&mirror_stat_lock);
+    int i = 0;
+    while (i < nwbs && !(wbs[i].site == site && wbs[i].gpu == gpu)) i++;
+    if (i == nwbs) {
+        if (nwbs == WBS_N) i = -1;
+        else wbs[nwbs++] = (typeof(wbs[0])){site, gpu, 0, 0, shader};
+    }
+    if (i >= 0) wbs[i].bytes += size, wbs[i].n++;
+    else wbs_lost += size;
+    plat_mutex_unlock(&mirror_stat_lock);
+}
+
+static void gpu_wrote(const VkMemSpan *sp, uint64_t size, int shader, uintptr_t site) {
     PoolRec *r = sp->pool;
     if (!r || r->mstate != MS_ON || sp->buffer != r->mbuf || !size) return;
     r->vd_wrote_sub = msub, r->vd_wrote_n++;
     // A binding to the end of its pool (no size) can span hundreds of MiB: those stay copies.
-    if (shader && !(sp->offset & 3) && !(size & 3) && size <= MERGE_MAX && merging() && snap_add(r, sp->offset, size))
-        return;
+    if (shader && !(sp->offset & 3) && !(size & 3) && size <= merge_max() && merging()) {
+        if (size <= MERGE_PIECE) {
+            if (snap_add(r, sp->offset, size)) return;
+        } else {   // pieces; one that finds no snapshot room goes back as a plain copy
+            for (uint64_t o = 0; o < size; o += MERGE_PIECE) {
+                uint64_t n = size - o < MERGE_PIECE ? size - o : MERGE_PIECE;
+                if (!snap_add(r, sp->offset + o, n)) range_add(&wbl, &nwbl, &cwbl, r, sp->offset + o, n);
+            }
+            return;
+        }
+    }
+    if (wbs_on < 0) wbs_on = rt_knob("LOG_WB", "0");
+    if (wbs_on) wbs_note(site, r, sp->offset, size, shader);
     range_add(&wbl, &nwbl, &cwbl, r, sp->offset, size);
 }
-void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size) { gpu_wrote(sp, size, 0); }
-void vk_mem_gpu_wrote_shader(const VkMemSpan *sp, uint64_t size) { gpu_wrote(sp, size, 1); }
+void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size) {
+    gpu_wrote(sp, size, 0, (uintptr_t)__builtin_return_address(0) - plat_exe_base());
+}
+void vk_mem_gpu_wrote_shader(const VkMemSpan *sp, uint64_t size) {
+    gpu_wrote(sp, size, 1, (uintptr_t)__builtin_return_address(0) - plat_exe_base());
+}
 
 // Adds [a, b) to l, n sorted ranges that do not touch; returns the new count. Above cap ranges (l holds cap + 1) the two
 // nearest merge, so a full list copies the fewest bytes that were not flushed; cap 1 keeps one span over all flushes.
@@ -2099,6 +2152,21 @@ static void mirror_log(uint64_t frame) {
            a.merge_dispatches / f, a.snap_bytes / f / M, a.snap_allocs / f, fc / f, fb / f / M,
            a.presnap_queries / f, a.presnap_bytes / f / M, a.sync_queries / f, a.prologues / f, qpc_ms(a.presnap_t + a.sync_t) / f,
            qpc_ms(a.presnap_t) / f, qpc_ms(a.sync_t) / f, ver);
+    if (wbs_on > 0) {
+        plat_mutex_lock(&mirror_stat_lock);
+        for (int k = 0; k < 10 && k < nwbs; k++) {   // the largest first
+            int b = k;
+            for (int j = k + 1; j < nwbs; j++)
+                if (wbs[j].bytes > wbs[b].bytes) b = j;
+            typeof(wbs[0]) t = wbs[k]; wbs[k] = wbs[b]; wbs[b] = t;
+            rt_log("mem: write-back frame %llu: #%d site +%#llx %s gpu %#llx: %.3f MiB per frame in %.1f writes",
+                   (unsigned long long)frame, k, (unsigned long long)wbs[k].site, wbs[k].shader ? "shader" : "copy",
+                   (unsigned long long)wbs[k].gpu, wbs[k].bytes / f / M, wbs[k].n / f);
+        }
+        if (wbs_lost) rt_log("mem: write-back frame %llu: %.3f MiB per frame not in the table", (unsigned long long)frame, wbs_lost / f / M);
+        nwbs = 0, wbs_lost = 0;
+        plat_mutex_unlock(&mirror_stat_lock);
+    }
     rt_log("mem: mirror frame %llu: upload sources per frame, overlaps counted twice: written pages %.3f MiB; flush ranges "
            "%.2f, %.3f MiB, from %.1f flushes of %.3f MiB", (unsigned long long)frame, a.page_bytes / f / M, a.flush_n / f,
            a.flush_bytes / f / M, a.flush_calls / f, a.flush_sum / f / M);

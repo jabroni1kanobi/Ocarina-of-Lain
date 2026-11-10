@@ -2152,6 +2152,48 @@ static void keys_flush(void) {
     plat_mutex_unlock(&K.io);
 }
 
+// Shipped pipeline keys (pipeline-keys-seed.bin next to the exe, same layout): the pipelines players met on the routes
+// the build was tested on, so a new player's boot prewarm builds them before play instead of each first visit waiting
+// for them (lab backlog 24: on an RX 9070 with cold caches a first visit had frames of 0.3-7.8 s). Records the player's
+// own file already has are skipped; seed records enter the seen set, so the player's file never copies them. Records
+// whose shaders this install has neither cached nor stored are dropped by the prewarm as usual.
+// NX2NAVI_PIPE_SEED=0 turns it off. Caller holds P.lock.
+static void keys_seed(void) {
+    if (!rt_knob("PIPE_SEED", "1")) return;
+    char path[PLAT_PATH_MAX * 2];
+    int n = plat_exe_path(path, sizeof path);
+    char *cut = n && n < (int)sizeof path ? plat_last_sep(path) : NULL;
+    if (!cut) return;
+    snprintf(cut + 1, sizeof path - (size_t)(cut + 1 - path), "pipeline-keys-seed.bin");
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    KeysHeader h;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    size_t m = 0, added = 0;
+    if (len >= (long)sizeof h && fread(&h, sizeof h, 1, f) == 1 && !memcmp(h.magic, "NX2NPKEY", 8) &&
+        h.version == KEYS_VERSION && h.rec_size == sizeof(KeyRec))
+        m = ((size_t)len - sizeof h) / sizeof(KeyRec);
+    KeyRec *seed = m ? malloc(m * sizeof *seed) : NULL;
+    if (seed && fread(seed, sizeof *seed, m, f) == m) {
+        uint8_t *grown = realloc(K.file, (K.file_n + m) * sizeof(KeyRec));
+        if (grown) {
+            K.file = grown;
+            for (size_t i = 0; i < m; i++) {
+                if (!seen_add(rec_hash(&seed[i]))) continue;   // the player's own file has it
+                memcpy(K.file + (K.file_n + added) * sizeof(KeyRec), &seed[i], sizeof(KeyRec));
+                added++;
+            }
+            K.file_n += added;
+        }
+    }
+    fclose(f);
+    free(seed);
+    rt_log("vk_pipeline: prewarm: %zu shipped pipeline keys in %s, %zu not in this player's own (NX2NAVI_PIPE_SEED=0 "
+           "turns them off)", m, path, added);
+}
+
 // Reads the key file into K.file and its record hashes into the set. Caller holds P.lock (ensure_init).
 static void keys_open(void) {
     if (!A.on || !P.cache_path[0]) return;
@@ -2161,7 +2203,10 @@ static void keys_open(void) {
     snprintf(slash ? slash + 1 : K.path, sizeof K.path - (size_t)(slash ? slash + 1 - K.path : 0), "pipeline-keys.bin");
     gfx_shader_record_at(K.path);   // shader-answers.bin next to it (gfx_shader.c)
     FILE *f = fopen(K.path, "rb");
-    if (!f) return;
+    if (!f) {
+        keys_seed();
+        return;
+    }
     KeysHeader h;
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
@@ -2199,6 +2244,7 @@ static void keys_open(void) {
         KeyRec *t = malloc(K.file_n * sizeof *t);
         if (t) memcpy(t, K.file, K.file_n * sizeof *t), K.pend = t, K.pend_n = K.pend_cap = (uint32_t)K.file_n;
     }
+    keys_seed();
 }
 
 static double now_ms(void) { return (double)plat_now_ns() / 1e6; }

@@ -486,15 +486,96 @@ static int tfr_match(const TargetFrames *e, const VkExecTarget *t) {
     return e->image == t->image && e->level == t->level && e->layer == t->base_layer;
 }
 
+// The same history keyed by the target's guest storage, format, extent and subresource. A per-frame target the
+// back end gives a new image every frame (storage shared with other textures, released and re-created between
+// frames) reads as never rendered by image, so each of its draws waited for its pipeline as a one-shot (own1: 50-270
+// ms per draw, frames up to 1.25 s, on a first visit with AMD's cold fragment libraries). By storage it is per-frame.
+// NX2NAVI_TARGET_BY_ADDR=0 turns this off.
+typedef struct { const void *mem; VkFormat fmt; uint32_t w, h, level, layer; uint64_t last, prev; } TargetAddrFrames;
+static TargetAddrFrames tfa[1024];
+static uint64_t tfa_rescued;   // passes the image history called new that the storage history called recent
+
+static int tfa_on(void) {
+    static int on = -1;
+    if (on < 0) on = rt_knob("TARGET_BY_ADDR", "1") != 0;
+    return on;
+}
+
+static const void *tfa_mem(const VkExecTarget *t) { return t->tex ? (const void *)t->tex->mem : NULL; }
+
+static TargetAddrFrames *tfa_slot(const VkExecTarget *t) {
+    uint64_t h = ((uint64_t)(uintptr_t)tfa_mem(t) ^ (uint64_t)t->format << 48 ^ (uint64_t)t->level << 56 ^
+                  (uint64_t)t->base_layer << 40 ^ (uint64_t)t->width << 20 ^ t->height) * 0x9E3779B97F4A7C15ull;
+    return &tfa[h >> 54];
+}
+
+static int tfa_match(const TargetAddrFrames *e, const VkExecTarget *t) {
+    return e->mem && e->mem == tfa_mem(t) && e->fmt == t->format && e->w == t->width && e->h == t->height &&
+           e->level == t->level && e->layer == t->base_layer;
+}
+
+// And by shape alone (format, extent, subresource): the game's per-frame colour targets of a pass may sit at a new
+// storage address every frame as well (a transient heap; ta1: 'seen N/0 (storage N/N-1)' was 'storage N/0' for the
+// 1494x840 colour target of the scene passes). A colour target whose shape was rendered the frame before, in a pass
+// whose depth target is per-frame, counts as per-frame (vk_exec_targets_recent); the item icon capture (a new shape)
+// still waits. NX2NAVI_TARGET_BY_SHAPE=0 turns this off.
+typedef struct { VkFormat fmt; uint32_t w, h, level, layer; uint64_t last, prev; } TargetShapeFrames;
+static TargetShapeFrames tfs[1024];
+static uint64_t tfs_rescued;
+
+static int tfs_on(void) {
+    static int on = -1;
+    if (on < 0) on = rt_knob("TARGET_BY_SHAPE", "1") != 0;
+    return on;
+}
+
+static TargetShapeFrames *tfs_slot(const VkExecTarget *t) {
+    uint64_t h = ((uint64_t)t->format << 48 ^ (uint64_t)t->level << 56 ^ (uint64_t)t->base_layer << 40 ^
+                  (uint64_t)t->width << 20 ^ t->height) * 0x9E3779B97F4A7C15ull;
+    return &tfs[h >> 54];
+}
+
+static int tfs_match(const TargetShapeFrames *e, const VkExecTarget *t) {
+    return e->fmt == t->format && e->w == t->width && e->h == t->height && e->level == t->level && e->layer == t->base_layer;
+}
+
+static int tfs_recent(const VkExecTarget *t, uint64_t stamp) {
+    if (!tfs_on()) return 0;
+    const TargetShapeFrames *e = tfs_slot(t);
+    return tfs_match(e, t) && (e->last == stamp ? e->prev : e->last) == stamp - 1;
+}
+
 static void tfr_note(const VkExecTarget *t, uint64_t stamp) {
+    if (tfs_on()) {
+        TargetShapeFrames *sh = tfs_slot(t);
+        if (!tfs_match(sh, t)) *sh = (TargetShapeFrames){t->format, t->width, t->height, t->level, t->base_layer, 0, 0};
+        if (sh->last != stamp) sh->prev = sh->last, sh->last = stamp;
+    }
     TargetFrames *e = tfr_slot(t);
     if (!tfr_match(e, t)) *e = (TargetFrames){t->image, t->level, t->base_layer, 0, 0};
     if (e->last != stamp) e->prev = e->last, e->last = stamp;
+    if (tfa_on() && tfa_mem(t)) {
+        TargetAddrFrames *a = tfa_slot(t);
+        if (!tfa_match(a, t)) *a = (TargetAddrFrames){tfa_mem(t), t->format, t->width, t->height, t->level, t->base_layer, 0, 0};
+        if (a->last != stamp) a->prev = a->last, a->last = stamp;
+    }
+}
+
+static int tfa_recent(const VkExecTarget *t, uint64_t stamp) {
+    if (!tfa_on() || !tfa_mem(t)) return 0;
+    const TargetAddrFrames *a = tfa_slot(t);
+    return tfa_match(a, t) && (a->last == stamp ? a->prev : a->last) == stamp - 1;
 }
 
 static int tfr_recent(const VkExecTarget *t, uint64_t stamp) {
     const TargetFrames *e = tfr_slot(t);
-    return tfr_match(e, t) && (e->last == stamp ? e->prev : e->last) == stamp - 1;
+    if (tfr_match(e, t) && (e->last == stamp ? e->prev : e->last) == stamp - 1) return 1;
+    if (!tfa_recent(t, stamp)) return 0;
+    uint64_t n = __atomic_add_fetch(&tfa_rescued, 1, __ATOMIC_RELAXED);
+    if (!(n & (n - 1)))   // 1, 2, 4, 8, ...
+        rt_log("vk_exec: frame %llu: %llu target lookups found a per-frame target by its storage that the image history "
+               "called new (fmt %d %ux%u)", (unsigned long long)stamp, (unsigned long long)n, (int)t->format, t->width, t->height);
+    return 1;
 }
 
 // No frame before the current one rendered the target (a slot another subresource took reads the same).
@@ -503,20 +584,31 @@ static int tfr_first(const VkExecTarget *t, uint64_t stamp) {
     return !tfr_match(e, t) || !(e->last == stamp ? e->prev : e->last);
 }
 
+
 // With any, a recent depth target alone does not make the pass per-frame when a colour target is rendered for the
 // first time: the game's item icon capture (an inventory icon) draws into a new colour target with the
 // per-frame depth buffer, once. Its draws skipped there stay missing from the icon until the item is captured again.
 int vk_exec_targets_recent(VkExec *ex, int any) {
     resolve_rt(ex);
     uint64_t stamp = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1;
-    int n = 0, color = 0, depth = 0, color_first = 0;
+    int n = 0, color = 0, depth = 0, color_first = 0, shaped = 1, shapes = 0;
     for (int i = 0; i < 9; i++) {
         const VkExecTarget *t = i < 8 ? &ex->color[i] : &ex->depth;
         if (!t->image) continue;
         n++;
         if (tfr_recent(t, stamp)) *(i < 8 ? &color : &depth) = 1;
         else if (!any) return 0;
-        else if (i < 8 && tfr_first(t, stamp)) color_first = 1;
+        else if (i < 8 && tfr_first(t, stamp)) {
+            color_first = 1;
+            if (tfs_recent(t, stamp)) shapes++;
+            else shaped = 0;
+        }
+    }
+    if (any && depth && color_first && shaped && shapes) {   // every new colour target has last frame's shape
+        uint64_t k = __atomic_add_fetch(&tfs_rescued, 1, __ATOMIC_RELAXED);
+        if (!(k & (k - 1))) rt_log("vk_exec: frame %llu: %llu passes with a per-frame depth target and new colour targets of "
+                                   "last frame's shapes counted as per-frame", (unsigned long long)stamp, (unsigned long long)k);
+        return 1;
     }
     return any ? color || (depth && !color_first) : n > 0;
 }
@@ -532,9 +624,12 @@ void vk_exec_targets_describe(VkExec *ex, char *buf, size_t cap) {
         if (!t->image) continue;
         const TargetFrames *e = tfr_slot(t);
         int m = tfr_match(e, t);
-        int w = snprintf(buf + n, cap - n, "%s%c%d fmt %d %ux%u L%u seen %llu/%llu", n ? "; " : "", i < 8 ? 'c' : 'd',
-                         i < 8 ? i : 0, (int)t->format, t->width, t->height, t->base_layer,
-                         (unsigned long long)(m ? e->last : 0), (unsigned long long)(m ? e->prev : 0));
+        const TargetAddrFrames *a = tfa_slot(t);
+        int am = tfa_match(a, t);
+        int w = snprintf(buf + n, cap - n, "%s%c%d fmt %d %ux%u L%u seen %llu/%llu (storage %llu/%llu)", n ? "; " : "",
+                         i < 8 ? 'c' : 'd', i < 8 ? i : 0, (int)t->format, t->width, t->height, t->base_layer,
+                         (unsigned long long)(m ? e->last : 0), (unsigned long long)(m ? e->prev : 0),
+                         (unsigned long long)(am ? a->last : 0), (unsigned long long)(am ? a->prev : 0));
         if (w < 0) break;
         n += (size_t)w;
     }
