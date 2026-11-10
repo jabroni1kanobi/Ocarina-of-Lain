@@ -46,6 +46,7 @@ typedef struct Tex {
     int uploaded, released;
     uint32_t rel_serial;          // reg_serial when it was released: slots registered before then are stale (slot_resolve)
     uint64_t rel_frame;           // gfx_counters.frames when it was released (drop_stale)
+    uint32_t rel_b, rel_before, rel_after;   // the release's address bucket and its generation before / after (take-back)
     uint32_t n_up;                // uploads of this entry (vk_texture_debug)
     int last_ch;                  // last vk_mem_changed result of make_fresh: 1 written, 0 clean, -1 not tracked
     struct Tex *next_at;          // other entries at the same storage address
@@ -153,15 +154,33 @@ static void dirty_push(uint32_t x) { dirty[ndirty++ % DIRTY_N] = x; }
 static uint64_t n_bumps, n_site[4];   // tex_gen_bump calls, by site: destroy, create, take-back, release   // tex_gen_bump calls, take-backs that undid a release's bump (vk_texture_bucket_stats)
 static uint32_t bump_count[AGEN_N];
 
+// A bump gives the bucket a value no bucket ever had (agen_next), so a generation seen once never comes back: a take-back
+// can then put the value from before the release back (below) without anyone who saw the released state mistaking a
+// later bump for it.
+static uint32_t agen_next;
+static uint64_t n_restored, n_restorable;   // take-backs that put the generation back / could have (vk_texture_bucket_stats)
+
 static void tex_gen_bump(uint64_t addr) {
     n_bumps++;
     bump_count[agen_idx(addr)]++;
     if (!++tex_gen) tex_gen = 1;
     slots_gen++;
     uint32_t b = agen_idx(addr);
-    uint32_t *g = &agen[b];
-    __atomic_store_n(g, *g + 1, __ATOMIC_RELEASE);
+    if (!++agen_next) agen_next = 1;
+    __atomic_store_n(&agen[b], agen_next, __ATOMIC_RELEASE);
     dirty_push(DIRTY_BUCKET | b);
+}
+
+// NX2NAVI_TAKEBACK_RESTORE (default 1): when a released texture is taken back at its address and nothing else at that
+// address bucket changed since its release, every slot there resolves as it did before the release (slots resolve
+// through the entries at their own address only), so the bucket gets its generation from before the release back
+// instead of a new one: the texture pool keeps those slots' descriptors. Ocarina releases and takes back transient
+// targets every frame, a quarter of a million bumps over the Kokiri route, and up to 1,612 slots sit over one such
+// address: the pool refilled about 22,000 of its 32,777 slots per submission set switch (2.06 ms each).
+static int takeback_restore_on(void) {
+    static int on = -1;
+    if (on < 0) on = rt_knob("TAKEBACK_RESTORE", "1");
+    return on;
 }
 
 // Moves slot id into bucket b's list (the lists exist once a slot was registered: vk_texture_register).
@@ -1243,7 +1262,20 @@ static Tex *entry_of(const tex_t *t) {
         n_site[1]++;
         tex_gen_bump(k.addr);
     }
-    if (e->released) e->released = 0, nreleased--, rel_unlink(e), n_site[2]++, tex_gen_bump(k.addr);
+    if (e->released) {
+        e->released = 0, nreleased--, rel_unlink(e);
+        uint32_t b = agen_idx(k.addr);
+        int can = e->rel_after && b == e->rel_b && __atomic_load_n(&agen[b], __ATOMIC_RELAXED) == e->rel_after;
+        n_restorable += can;
+        if (can && takeback_restore_on()) {
+            __atomic_store_n(&agen[b], e->rel_before, __ATOMIC_RELEASE);
+            dirty_push(DIRTY_BUCKET | b);   // a pool sync in between holds the released state's tokens: it must look again
+            n_restored++;
+        } else {
+            n_site[2]++, tex_gen_bump(k.addr);
+        }
+        e->rel_after = 0;
+    }
     e->t = *t;
     return e;
 }
@@ -1340,7 +1372,9 @@ void vk_texture_release(const tex_t *t) {
         nreleased++;
         rel_append(e);
         n_site[3]++;
+        e->rel_b = agen_idx(k.addr), e->rel_before = agen[e->rel_b];
         tex_gen_bump(k.addr);
+        e->rel_after = agen[e->rel_b];
         sweep_released();
     }
     unlock();
@@ -1518,10 +1552,12 @@ void vk_texture_bucket_stats(char *out, size_t n) {
             }
     uint64_t hot = 0;   // bumps weighted by the slots they invalidate
     for (int b = 0; b < AGEN_N; b++) hot += (uint64_t)bump_count[b] * occ[b];
-    snprintf(out, n, "%llu bumps (destroy %llu, create %llu, take-back %llu, release %llu), %llu slot invalidations; fullest buckets %u/%u/%u/%u slots, bumped %u/%u/%u/%u",
+    snprintf(out, n, "%llu bumps (destroy %llu, create %llu, take-back %llu, release %llu), %llu slot invalidations; fullest buckets %u/%u/%u/%u slots, bumped %u/%u/%u/%u; take-backs restored %llu (could %llu)",
              (unsigned long long)n_bumps, (unsigned long long)n_site[0], (unsigned long long)n_site[1],
              (unsigned long long)n_site[2], (unsigned long long)n_site[3], (unsigned long long)hot, occ[top[0]], occ[top[1]], occ[top[2]], occ[top[3]],
-             bump_count[top[0]], bump_count[top[1]], bump_count[top[2]], bump_count[top[3]]);
+             bump_count[top[0]], bump_count[top[1]], bump_count[top[2]], bump_count[top[3]],
+             (unsigned long long)n_restored, (unsigned long long)n_restorable);
+    n_restored = n_restorable = 0;
     n_bumps = 0;
     memset(n_site, 0, sizeof n_site);
     memset(bump_count, 0, sizeof bump_count);

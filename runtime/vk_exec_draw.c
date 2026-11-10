@@ -571,13 +571,29 @@ int vk_exec_raw_9e5(VkImage img, VkFormat f) { return raw_9e5(img, f); }
 
 // The format a storage view of img takes: the view's integer format when it sets one of the image's texel size (the
 // image is MUTABLE_FORMAT, vk_texture.c), else the image's own.
+static int vk_format_is_srgb(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_B8G8R8A8_SRGB: case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+    case VK_FORMAT_R8_SRGB: case VK_FORMAT_R8G8_SRGB: return 1;
+    default: return 0;
+    }
+}
+
 static VkFormat storage_view_format(const VkTexImage *img, const view_t *v, int hv) {
     VkFormat f;
     if (hv && v->set_format && int_view_format(v->format, &f) && texel_bytes(f) && texel_bytes(f) == texel_bytes(img->format)) {
         if (img->format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) raw_note(img->image);
         return f;
     }
-    return img->format;
+    // sRGB formats have no storage support (the validation layer: R8G8B8A8_SRGB with optimal tiling lacks
+    // STORAGE_IMAGE_BIT), and an image store converts nothing on Maxwell either: the view of the same bits as UNORM.
+    // Images other than depth are created mutable (vk_texture.c).
+    switch (img->format) {
+    case VK_FORMAT_R8G8B8A8_SRGB: return VK_FORMAT_R8G8B8A8_UNORM;
+    case VK_FORMAT_B8G8R8A8_SRGB: return VK_FORMAT_B8G8R8A8_UNORM;
+    case VK_FORMAT_A8B8G8R8_SRGB_PACK32: return VK_FORMAT_A8B8G8R8_UNORM_PACK32;
+    default: return img->format;
+    }
 }
 
 // An image view of a registered texture for a shader resource of type `rtype` (GfxShaderRes.type); VK_NULL_HANDLE when
@@ -642,6 +658,10 @@ static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, 
     VkImageViewUsageCreateInfo use = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
                                       .usage = VK_IMAGE_USAGE_SAMPLED_BIT};
     if (img->block_views) ci.pNext = &use;   // the image's COLOR_ATTACHMENT usage is its block views' (vk_texture.c)
+    // An sRGB view inherits the image's STORAGE usage, which sRGB formats do not support (the validation layer: R8G8B8A8_SRGB
+    // with optimal tiling lacks STORAGE_IMAGE_BIT): the view gets only the usage it serves. Storage views of sRGB images
+    // use the UNORM format (storage_view_format).
+    else if (!storage && vk_format_is_srgb(vf)) ci.pNext = &use;
     VkImageView view;
     if (vkCreateImageView(vk_ctx()->device, &ci, NULL, &view) != VK_SUCCESS) return VK_NULL_HANDLE;
     ViewNode *n = malloc(sizeof *n);
@@ -667,7 +687,8 @@ VkImageView vk_exec_target_view(const VkTexImage *img, VkFormat format, VkImageV
                                     .viewType = type, .format = format, .subresourceRange = {aspect, level, 1, base, layers}};
         VkImageViewUsageCreateInfo use = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
                                           .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT};
-        if (blocks) ci.pNext = &use;   // not the BC image's sampling and transfer usages
+        if (blocks || (vk_format_is_srgb(format) && (aspect & VK_IMAGE_ASPECT_COLOR_BIT)))
+            ci.pNext = &use;   // not the BC image's sampling and transfer usages; an sRGB view not the image's STORAGE usage
         if (vkCreateImageView(vk_ctx()->device, &ci, NULL, &view) != VK_SUCCESS)
             rt_fatal("vk: render target view (format %d) could not be created", (int)format);
         ViewNode *n = malloc(sizeof *n);

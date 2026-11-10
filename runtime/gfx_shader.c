@@ -629,6 +629,46 @@ static void spirv_float_bits(uint32_t **spirv, uint64_t *words, int stage) {
     if (c == 1 || c % 500 == 0) rt_log("gfx_shader: %d modules keep raw float bits so far (float controls)", c);
 }
 
+// Storage images of Unknown format read (OpImageRead) or written (OpImageWrite) need the capabilities
+// StorageImageReadWithoutFormat / StorageImageWriteWithoutFormat; translated modules did not always declare them. Such a
+// module is invalid SPIR-V (the Khronos validation layer's spirv-val rejected 8 modules of the Kokiri route this way), and
+// what a driver makes of it is up to the driver. The device enables both features where it has them (vk_device.c).
+// NX2NAVI_FMTLESS_CAPS=0 leaves modules as they are. In memory only, like spirv_float_bits.
+static void spirv_formatless_caps(uint32_t **spirv, uint64_t *words) {
+    enum { OP_CAPABILITY = 17, OP_TYPE_IMAGE = 25, OP_IMAGE_READ = 98, OP_IMAGE_WRITE = 99, CAP_READ = 55, CAP_WRITE = 56 };
+    static int on = -1;
+    if (on < 0) on = rt_knob("FMTLESS_CAPS", "1");
+    if (!on) return;
+    const uint32_t *w = *spirv;
+    uint64_t n = *words, first_cap = 0;
+    int unknown = 0, rd = 0, wr = 0, has_rd = 0, has_wr = 0;
+    for (uint64_t i = 5; i < n; i += w[i] >> 16) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len) return;
+        if (op == OP_CAPABILITY) {
+            if (!first_cap) first_cap = i;
+            has_rd |= w[i + 1] == CAP_READ, has_wr |= w[i + 1] == CAP_WRITE;
+        } else if (op == OP_TYPE_IMAGE && len >= 9 && w[i + 7] == 2 && w[i + 8] == 0) unknown = 1;   // storage, Unknown
+        else if (op == OP_IMAGE_READ) rd = 1;
+        else if (op == OP_IMAGE_WRITE) wr = 1;
+    }
+    int add_rd = unknown && rd && !has_rd, add_wr = unknown && wr && !has_wr;
+    if (!first_cap || !(add_rd || add_wr)) return;
+    uint32_t add = 2 * (uint32_t)(add_rd + add_wr);
+    uint32_t *o = malloc((n + add) * 4);
+    if (!o) rt_fatal("gfx_shader: out of memory");
+    uint64_t k = 0;
+    memcpy(o, w, first_cap * 4), k = first_cap;
+    if (add_rd) o[k++] = 2u << 16 | OP_CAPABILITY, o[k++] = CAP_READ;
+    if (add_wr) o[k++] = 2u << 16 | OP_CAPABILITY, o[k++] = CAP_WRITE;
+    memcpy(o + k, w + first_cap, (n - first_cap) * 4), k += n - first_cap;
+    free(*spirv);
+    *spirv = o, *words = k;
+    static volatile int32_t marked;
+    int32_t c = plat_inc32(&marked);
+    if (c == 1 || c % 100 == 0) rt_log("gfx_shader: %d modules got the format-less storage image capabilities", c);
+}
+
 // NX2NAVI_MESH_INVARIANT=1: mesh stages decorate their Position as Invariant, as translator patch 0007 does for vertex
 // stages. Without it two programs may compute one position differently, and a depth test against an earlier pass fails
 // in spots. In memory only, like spirv_float_bits.
@@ -790,6 +830,7 @@ static GfxShader *disk_load_from(const uint8_t key[32], const uint8_t *iid, int 
     spirv_float_bits(&s->spirv, &s->words, s->stage);
     spirv_mesh_invariant(&s->spirv, &s->words, s->stage);
     spirv_fetch_clamp(&s->spirv, &s->words);
+    spirv_formatless_caps(&s->spirv, &s->words);
     return s;
 }
 
