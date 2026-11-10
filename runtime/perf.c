@@ -9,6 +9,7 @@
 #include "flight.h"
 #include "gfx.h"
 #include "host.h"
+#include "kernel.h"
 #include "perfmon.h"
 #include "prof.h"
 #include "platform/platform.h"
@@ -42,6 +43,7 @@ uint64_t perf_gpu_busy_total(void) { return (uint64_t)__atomic_load_n(&gpu_busy_
 
 void prof_start(void) {
     flight_init();
+    waitlog_init();
     atexit(perf_summary_flush);   // boot.c's _exit path goes through prof_write instead
     perf_base = (rt_trace & RT_TRACE_PERF) || flight_on;
     perf_on = perf_base || overlay == 2;
@@ -271,6 +273,7 @@ void perf_present(uint64_t frame) {
         perfmon_frame(now, d, frame_ns, rep, __atomic_load_n(&counts[PERF_CNT_TEX_UP], __ATOMIC_RELAXED));
     kern_core_diag_frame(frame, d);
     if (flight_on) flight_frame(frame, now, d, frame_ns, counts);
+    if (waitlog_on) waitlog_frame(frame, d);
     if (!(rt_trace & RT_TRACE_PERF)) {
         memset(frame_ns, 0, sizeof frame_ns);
         last = now;

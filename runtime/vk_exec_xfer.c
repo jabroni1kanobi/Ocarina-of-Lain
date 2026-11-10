@@ -34,12 +34,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cfg.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_tex.h"
 #include "tex.h"
 #include "vk.h"
 #include "vk_exec.h"
+#include "platform/platform.h"
 
 enum { W_FORMAT, W_REGION, W_BUFFER, W_OVERLAP, W_COPY, W_CLEAR, W_QUERY, W_COUNT };
 
@@ -298,11 +300,22 @@ static void oq_cb(void *arg) {
         }
         i = j;
     }
+    // NX2NAVI_OQ_FORCE=<n> (diagnostic): a report that would read 0 reads n, so nothing the game tests is occlusion-culled.
+    static int64_t force = -1;
+    if (force < 0) {
+        const char *e = cfg_get("NX2NAVI_OQ_FORCE");
+        force = e && *e ? strtoll(e, NULL, 0) : 0;
+        if (force) rt_log("vk: NX2NAVI_OQ_FORCE: samples-passed reports of 0 read %lld", (long long)force);
+    }
     if (s->reset) oq_count = 0;
     else {
         oq_count += sum;
         if (s->lost && !oq_count) oq_count = 1;
-        if (s->addr) write_counter(s->addr, oq_count), pending_written(s->addr, s->seq), vk_drawset_report_value(s->ds_cell, oq_count);
+        uint64_t w = !oq_count && force ? (uint64_t)force : oq_count;
+        static volatile int64_t n_forced;
+        if (w != oq_count && (plat_inc64(&n_forced) & 65535) == 1)
+            rt_log("vk: NX2NAVI_OQ_FORCE: %lld zero reports forced", (long long)n_forced);
+        if (s->addr) write_counter(s->addr, w), pending_written(s->addr, s->seq), vk_drawset_report_value(s->ds_cell, oq_count);
     }
     free(s);
 }

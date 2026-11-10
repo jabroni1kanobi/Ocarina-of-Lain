@@ -34,7 +34,7 @@ static const char *const count_names[C_N] = {
 _Static_assert(PERF_CNT_N == 12, "count_names follows the PERF_CNT_* list");
 
 typedef struct {
-    uint64_t frame, t_ns;
+    uint64_t frame, t_ns, tick;   // tick: frame_step_ticks (input script game time)
     uint32_t interval_us, blocked_us[PERF_N], n[C_N];
 } Rec;
 
@@ -270,13 +270,14 @@ static void dump_main(void *arg) {
     }
     fprintf(f, "# nx2navi flight dump: %s at frame %llu, interval %.1f ms\n", j->why, (unsigned long long)j->trig_frame,
             j->trig_interval_us / 1000.0);
-    fprintf(f, "frame\tt_ms\tinterval_ms");
+    fprintf(f, "frame\ttick\tt_ms\tinterval_ms");
     for (int k = 0; k < PERF_N; k++) fprintf(f, "\t%s", blocked_names[k]);
     for (int k = 0; k < C_N; k++) fprintf(f, "\t%s", count_names[k]);
     fprintf(f, "\tthumb\n");
     for (int i = 0; i < j->n; i++) {
         const Rec *r = &j->r[i];
-        fprintf(f, "%llu\t%.1f\t%.2f", (unsigned long long)r->frame, r->t_ns / 1e6, r->interval_us / 1000.0);
+        fprintf(f, "%llu\t%llu\t%.1f\t%.2f", (unsigned long long)r->frame, (unsigned long long)r->tick, r->t_ns / 1e6,
+                r->interval_us / 1000.0);
         for (int k = 0; k < PERF_N; k++) fprintf(f, "\t%.2f", r->blocked_us[k] / 1000.0);
         for (int k = 0; k < C_N; k++) fprintf(f, "\t%u", r->n[k]);
         fprintf(f, "\t%d\n", have ? have[i] : 0);
@@ -324,6 +325,7 @@ void flight_frame(uint64_t frame, uint64_t now_ns, uint64_t interval_ns, const u
     Rec *r = &ring[recorded % (uint64_t)ring_n];
     r->frame = frame;
     r->t_ns = now_ns - t0_ns;
+    r->tick = frame_step_ticks();
     r->interval_us = (uint32_t)(interval_ns / 1000);
     for (int k = 0; k < PERF_N; k++) r->blocked_us[k] = (uint32_t)(blocked_ns[k] / 1000);
     // vk_exec_frame grows until vk_exec_frame_log resets it, which NX2NAVI_TRACE=gfx does right after this call

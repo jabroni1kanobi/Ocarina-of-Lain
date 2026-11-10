@@ -127,6 +127,8 @@ static void unlock(void) { plat_mutex_unlock(&G); }
 
 uint64_t kern_now_ns(void) { return plat_now_ns(); }
 
+uint64_t kern_thread_gid(const void *t) { return t ? ((const RtThread *)t)->id : 0; }
+
 // ---- NX2NAVI_CRIT=<first>-<last frame> with NX2NAVI_TRACE=sched: every state change and wake of the guest threads and
 // every present over those frames, written to NX2NAVI_CRIT_OUT (default crit.bin) at the last one, for
 // tools/crit_path.py, which walks the chain of waits back from each present (holding G). NX2NAVI_CRIT=w<lo>-<hi> takes

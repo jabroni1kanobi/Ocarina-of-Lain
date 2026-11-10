@@ -138,6 +138,20 @@ static void svc_body(Cpu *c, uint32_t imm, uint64_t pc);
 
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
     kern_checkpoint();
+    if (__builtin_expect(waitlog_on, 0) && waitlog_blocking(imm)) {   // NX2NAVI_WAITLOG: timed, then as below
+        uint64_t a0 = c->x[0], a1 = c->x[1], t0 = kern_now_ns();
+        void *t = c->thread;
+        int *d = kern_host_track && t ? kern_host_depth(t) : NULL;
+        if (d) __atomic_store_n(d, *d + 1, __ATOMIC_RELAXED);
+        svc_body(c, imm, pc);
+        if (d) {
+            int n = *d - 1;
+            __atomic_store_n(d, n, __ATOMIC_RELAXED);
+            if (!n && kern_preempt_pending(t)) kern_host_left(t);
+        }
+        waitlog_svc(c, imm, a0, a1, kern_now_ns() - t0);
+        return;
+    }
     if (__builtin_expect(!kern_host_track || !c->thread, 1)) {
         svc_body(c, imm, pc);
         return;
