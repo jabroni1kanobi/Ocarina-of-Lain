@@ -672,19 +672,43 @@ NVN_API(nvnQueueSubmitCommands) {
 
 // The producer (1.2.1 main) releases the read lock on obj+0x538; when
 // [obj+0x529] == [obj+0x528] (x19 = obj) it goes on to rewrite the back half. Waits off the core, at most ~400 ms.
-// No return-address check: the landed build's lift addresses differ from the original binary's, which is why the
-// guard never fired and the LOD uniforms raced one frame stale at fixed spots (Kokiri pops).
+// The return address is the game version's: 1.2.1 releases at 0x70008c70c8 (f_70008c6460); 1.1.1's producer is
+// f_70004095a0, which tries the read lock at lr 0x70004099a0, flips the halves when [obj+0x528] != [obj+0x529], and when
+// they are equal releases the lock at lr 0x7000409f78 and goes on to rewrite the back half (from lr 0x7000409fd0). Before
+// this the guard listened for 1.2.1's address only and never fired on 1.1.1 (0 of 565,248 releases in a Kokiri run).
 static void obs_release_read(Cpu *c) {
     uint64_t lr = c->x[30], lock = c->x[0], obj = lock >= 0x538 ? lock - 0x538 : 0;
     rt_original(c);
-    if (lr != 0x70008c70c8ull && lr != 0x70004099a0ull) return;
     static int on = -1;
     if (on < 0) {
         on = cfg_bool("NX2NAVI_LOD_GUARD");
     }
+    // NX2NAVI_LOD_GUARD: counts every 4096 releases, and the return addresses of releases whose object has the producer's
+    // shape ([obj+0x528] == [obj+0x529]), so a log shows whether the guard's addresses are the ones the game uses
+    static volatile int64_t n_rel, n_lr, n_shape, n_wait;
+    static uint64_t seen_lr[8];
+    static volatile int32_t n_seen;
+    int64_t r = on ? plat_inc64(&n_rel) : 0;
     uint8_t b0, b1;
-    if (!on || !obj || !plat_mem_read(obj + 0x528, &b0, 1) || !plat_mem_read(obj + 0x529, &b1, 1) || b0 != b1)
-        return;
+    int shape = on && obj && plat_mem_read(obj + 0x528, &b0, 1) && plat_mem_read(obj + 0x529, &b1, 1) && b0 == b1;
+    if (shape) {
+        plat_inc64(&n_shape);
+        int k = 0;
+        while (k < 8 && k < n_seen && seen_lr[k] != lr) k++;
+        if (k == n_seen && k < 8) {
+            seen_lr[k] = lr, plat_inc32(&n_seen);
+            rt_log("lod guard: release of a producer-shaped lock from lr %#llx (%s)", (unsigned long long)lr,
+                   lr == (rt_game_version < 120 ? 0x7000409f78ull : 0x70008c70c8ull) ? "guarded" : "not guarded");
+        }
+    }
+    if (on && (r & 4095) == 0)
+        rt_log("lod guard: %lld releases, %lld producer-shaped, %lld at a guarded address, %lld waits", (long long)r,
+               (long long)n_shape, (long long)n_lr, (long long)n_wait);
+    const uint64_t want = rt_game_version < 120 ? 0x7000409f78ull : 0x70008c70c8ull;
+    if (lr != want) return;
+    if (on) plat_inc64(&n_lr);
+    if (!on || !shape) return;
+    plat_inc64(&n_wait);
     uint64_t e = __atomic_load_n(&lod_entered, __ATOMIC_SEQ_CST);
     if (!e) return;
     NVN_BLOCKING();

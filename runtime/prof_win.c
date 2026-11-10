@@ -75,6 +75,7 @@ static uint64_t ring_n;
 static Sample stalls[STALL_RING];   // t: when the stop began; rip[PROF_DEPTH - 1] holds the stop's ns
 static uint64_t stall_n;
 static uint64_t slow_ns;            // NX2NAVI_PROFILE_SLOW in ns, 0 off
+static uint64_t slow_after;         // NX2NAVI_PROFILE_SLOW_AFTER=<frame>: no dump before it (a load's slow frames would use them up)
 static volatile LONG64 dump_lo, dump_hi, dump_frame;   // the render thread asks for a window, the sampler writes it
 
 static void count_rip(uint64_t rip) {
@@ -368,6 +369,8 @@ int prof_sampler_start(void) {
     const char *ch = cfg_get("NX2NAVI_PROFILE_CHAINS");
     const char *sl = cfg_get("NX2NAVI_PROFILE_SLOW");
     slow_ns = sl && atoi(sl) > 0 ? (uint64_t)atoi(sl) * 1000000ull : 0;
+    const char *sa = cfg_get("NX2NAVI_PROFILE_SLOW_AFTER");
+    slow_after = sa && *sa ? strtoull(sa, NULL, 10) : 0;
     chains = only_render || only_main || slow_ns || (ch && *ch && strcmp(ch, "0"));
     const char *fr = cfg_get("NX2NAVI_PROFILE_FRAMES");
     double wl, wh;
@@ -396,7 +399,7 @@ void prof_sampler_frame(uint64_t frame, uint64_t now, uint64_t d) {
     // the end of a NX2NAVI_PROFILE_FRAMES window writes the profile then: a test run ended by a timeout never reaches
     // the exit handlers (prof_write)
     if (frame_hi && frame > frame_hi && !written) prof_sampler_write();
-    if (slow_ns && d >= slow_ns && !dump_hi) {
+    if (slow_ns && d >= slow_ns && !dump_hi && frame >= slow_after) {
         dump_lo = (LONG64)(now - d - 20000000ull);
         dump_frame = (LONG64)frame;
         InterlockedExchange64(&dump_hi, (LONG64)now);
