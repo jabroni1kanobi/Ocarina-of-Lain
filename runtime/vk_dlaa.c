@@ -1207,7 +1207,11 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
         D.last_eval_ns = now;
         VkFfxImage fc = {t->image, t->format, w, h, 0}, fz = {z->image, z->format, w, h, 0},
                    fm = {e->mv, VK_FORMAT_R16G16_SFLOAT, w, h, 1}, fo = {e->out, VK_FORMAT_R16G16B16A16_SFLOAT, ow, oh, 1};
-        if (!vk_ffx_upscale(cb, &fc, &fz, &fm, &fo, jx, jy, D.reset, dt > 0 && dt < 100 ? (float)dt : 16.67f, 0))
+        // the reactive mask (NX2NAVI_DLSS_REACTIVE=1, mask_pass) where it ran this frame: FSR trusts this frame's
+        // colour there (particles, fairies: their motion is the surface's behind them)
+        VkFfxImage fr = {mk ? mk->mask : VK_NULL_HANDLE, VK_FORMAT_R8_UNORM, w, h, 0};
+        if (!vk_ffx_upscale(cb, &fc, &fz, &fm, &fo, jx, jy, D.reset, dt > 0 && dt < 100 ? (float)dt : 16.67f, 0,
+                            mk ? &fr : NULL))
             return dl_fail("FSR 3.1", 0);
         static int told;
         if (!told++) rt_log("dlaa: FSR 3.1 at %ux%u -> %ux%u (scene format %d, depth format %d)", w, h, ow, oh,

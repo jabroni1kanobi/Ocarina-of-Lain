@@ -128,7 +128,8 @@ extern "C" int vk_ffx_load(void) {
 }
 
 extern "C" int vk_ffx_upscale(VkCommandBuffer cb, const VkFfxImage *color, const VkFfxImage *depth, const VkFfxImage *mv,
-                              const VkFfxImage *out, float jx, float jy, int reset, float dt_ms, float fov_y) {
+                              const VkFfxImage *out, float jx, float jy, int reset, float dt_ms, float fov_y,
+                              const VkFfxImage *reactive) {
     if (!vk_ffx_load()) return 0;
     Up *u = context_for(color->width, color->height, out->width, out->height);
     if (!u) return 0;
@@ -140,6 +141,7 @@ extern "C" int vk_ffx_upscale(VkCommandBuffer cb, const VkFfxImage *color, const
     d.depth = image(depth, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS, 0);
     d.motionVectors = image(mv, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS, 0);
     d.output = image(out, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS, FFX_API_RESOURCE_USAGE_UAV);
+    if (reactive) d.reactive = image(reactive, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS, 0);
     d.jitterOffset = {jx, jy};
     d.motionVectorScale = {1.0f, 1.0f};
     d.renderSize = {color->width, color->height};

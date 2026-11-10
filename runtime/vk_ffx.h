@@ -13,8 +13,10 @@ int vk_ffx_load(void);   // 1 when the library is there with its entry points (l
 // Records FSR 3.1 into cb: color (the scene light, render size), depth (D32F), mv (R16G16F, render pixels, current to
 // previous), out (the output size, RGBA16F, storage). jx, jy: the jitter the scene took, render pixels. fov_y in
 // radians (0: unknown). 0 on failure (the caller falls back as it does when DLSS fails).
+// reactive: optional R8 mask (1: trust this frame's colour; particles), NULL: none.
 int vk_ffx_upscale(VkCommandBuffer cb, const VkFfxImage *color, const VkFfxImage *depth, const VkFfxImage *mv,
-                   const VkFfxImage *out, float jx, float jy, int reset, float dt_ms, float fov_y);
+                   const VkFfxImage *out, float jx, float jy, int reset, float dt_ms, float fov_y,
+                   const VkFfxImage *reactive);
 void vk_ffx_release(void);   // before the device goes away
 
 #ifdef __cplusplus
