@@ -56,6 +56,8 @@ void vk_mvprev_draw(VkExec *ex);   // vk_mvprev.c: notes the scene draw's object
 int vk_mvobj_execute(VkExec *ex, uint64_t cam, VkImageView mv, VkImageView depth, VkFormat depth_fmt, uint32_t w,
                      uint32_t h);
 int vk_dlaa_prev_camera(VkDescriptorBufferInfo *out, float jitter[2]);
+// vk_dlaa_cam_addr: this frame's scene camera block address (0: none seen) and its size in *size (probe use).
+uint64_t vk_dlaa_cam_addr(uint32_t *size);
 // vk_mvcheck.c (NX2NAVI_MV_CHECK, test): mv_pass hands it the motion image after the camera pass and, after the object
 // pass, the motion image again and the scene light target it ran on; it measures how well the vectors fit the picture.
 void vk_mvcheck_camera(VkCommandBuffer cb, VkImage mv, uint32_t w, uint32_t h, float jx, float jy);

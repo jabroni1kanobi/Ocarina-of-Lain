@@ -3552,6 +3552,57 @@ static int mo_prev_cached(int index, const p_bind_buf *u, VkDescriptorBufferInfo
     return r;
 }
 
+// The scene camera's bank: c4 in the deferred engine (gsys), c3 in Ocarina, whose scene context block (OCAM_BLOCK,
+// 0x3500) its vertex shaders read there and whose c4 is an object's own place (one 0x100 block per object, two copies
+// that take turns like the other engine's c7: mp1/mvs1, 2026-11-10). NX2NAVI_MVOBJ_OCARINA=0: c4 everywhere (as before,
+// where Ocarina got no per-object motion at all).
+#define OCAM_BLOCK_SIZE 0x3500u
+static int mo_cam_bank(void) {
+    static int on = -1;
+    if (on < 0) on = rt_knob("MVOBJ_OCARINA", "1");
+    uint32_t sz = 0;
+    return on && vk_dlaa_cam_addr(&sz) && sz == OCAM_BLOCK_SIZE ? 3 : 4;
+}
+
+// NX2NAVI_MVOBJ_PROBE=1 (diagnosis, Ocarina's per-object motion): for the solid scene draws of frames 3000-3001, one
+// line each (up to 120) with the vertex shader, every user bank it reads (address, size; '*' = the scene camera block
+// vk_dlaa found) and the banks its position variant depends on.
+static void mvobj_probe(VkExec *ex) {
+    static int on = -1, lines;
+    if (on < 0) on = rt_knob("MVOBJ_PROBE", "0");
+    if (!on || lines >= 120) return;
+    uint64_t frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (frame < 3000 || frame > 3001) return;
+    uint32_t csz = 0;
+    uint64_t cam = vk_dlaa_cam_addr(&csz);
+    const GfxShaderRes *ur;
+    int nu = gfx_shader_resources(B.st.vs, GFX_RES_UBO, &ur);
+    char buf[900];
+    int o = snprintf(buf, sizeof buf, "mvprobe: frame %llu vs %p cam %#llx/%#x:", (unsigned long long)frame,
+                     (const void *)B.st.vs, (unsigned long long)cam, csz);
+    for (int i = 0; i < nu && o < 760; i++) {
+        int b = ur[i].slot;
+        if (b < 3 || b > 16) continue;
+        const p_bind_buf *u = &ex->ubo[NVN_STAGE_VS][b - 3];
+        o += snprintf(buf + o, sizeof buf - o, " c%d %#llx/%#llx%s", b, (unsigned long long)u->addr,
+                      (unsigned long long)u->size, u->addr && u->addr == cam ? "*" : "");
+    }
+    int has, pending = 0;
+    sf_mvprev = 1;
+    const GfxShader *v = shader_for(ex, NVN_STAGE_VS, &has, &pending, 0);
+    sf_mvprev = 0;
+    if (v && !pending) {
+        GfxShaderIo io[32];
+        uint32_t extra = gfx_shader_outputs(v, io) & ~gfx_shader_outputs(B.st.vs, io);
+        snprintf(buf + o, sizeof buf - o, "; position banks %#x (extra outputs %#x)",
+                 extra ? gfx_shader_mvprev_banks(v) & 0x1fff8u : 0, extra);
+    } else {
+        snprintf(buf + o, sizeof buf - o, "; variant %s", pending ? "pending" : "none");
+    }
+    lines++;
+    rt_log("%s", buf);
+}
+
 static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSize ib_off, uint64_t t0) {
     mvobj_banks(ex);
     const VkExecTarget *z = &ex->depth;
@@ -3560,10 +3611,12 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
     // solid geometry only, which tests and writes the scene depth: effects, particles and screen quads write none, and
     // drawn again they would put their motion on the surfaces behind them (DLSS takes those from the surface)
     if (!B.st.ds.dt || !B.st.ds.dw) return;
-    // a vertex shader that reads a user bank besides the camera's (c4) may move on its own
+    mvobj_probe(ex);
+    const int cb = mo_cam_bank();
+    // a vertex shader that reads a user bank besides the camera's (c4; Ocarina c3) may move on its own
     const GfxShaderRes *ur;
     int nu = gfx_shader_resources(B.st.vs, GFX_RES_UBO, &ur), reads = 0;
-    for (int i = 0; i < nu; i++) reads |= ur[i].slot >= 3 && ur[i].slot <= 16 && ur[i].slot != 4;
+    for (int i = 0; i < nu; i++) reads |= ur[i].slot >= 3 && ur[i].slot <= 16 && ur[i].slot != cb;
     if (!reads) return;
     MO.cand++;
     uint64_t tp = t0 ? kern_now_ns() : 0;
@@ -3588,11 +3641,11 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
         uint32_t extra = gfx_shader_outputs(v, io) & ~gfx_shader_outputs(B.st.vs, io);
         uint32_t banks = extra ? gfx_shader_mvprev_banks(v) & 0x1fff8u : 0;
         vmemo[vi].of = B.st.vs, vmemo[vi].vs = v, vmemo[vi].banks = banks;
-        vk_mvprev_want((banks & ~(1u << 4)) >> 3);   // binding index = bank - 3
+        vk_mvprev_want((banks & ~(1u << cb)) >> 3);   // binding index = bank - 3
     }
     const GfxShader *vs = vmemo[vi].vs;
     uint32_t banks = vmemo[vi].banks;
-    if (!banks || !(banks & ~(1u << 4))) {
+    if (!banks || !(banks & ~(1u << cb))) {
         MO.no_out++;
         return;
     }
@@ -3601,7 +3654,7 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
     // (NX2NAVI_MV_CHECK while turning: 6.2 px end-point error against the camera vectors' 1.7)
     static int noc4 = -1;
     if (noc4 < 0) noc4 = rt_knob("MVOBJ_NOC4", "0");   // NX2NAVI_MVOBJ_NOC4=1 (test): drawn again all the same
-    if (!(banks >> 4 & 1) && !noc4) {
+    if (!(banks >> cb & 1) && !noc4) {
         MO.no_out++;
         return;
     }
@@ -3611,7 +3664,9 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
     // were half the draws checked and listed. NX2NAVI_MVOBJ_ALL=1 (test) takes them again.
     static int all = -1;
     if (all < 0) all = rt_knob("MVOBJ_ALL", "0");
-    if (!all && !(banks & (1u << 5 | 1u << 6 | 1u << 7))) {
+    // Ocarina: its place bank c4 counts too (objects that move without bones: fairies, leaves, doors)
+    uint32_t own = 1u << 5 | 1u << 6 | 1u << 7 | (cb == 3 ? 1u << 4 : 0);
+    if (!all && !(banks & own)) {
         MO.no_out++;
         return;
     }
@@ -3621,7 +3676,7 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
         const char *e = cfg_get("NX2NAVI_MVOBJ_ONLY");
         only = e && *e ? strtol(e, NULL, 16) : -1;
     }
-    if (only >= 0 && banks & ~(uint32_t)only & ~(1u << 4)) return;
+    if (only >= 0 && banks & ~(uint32_t)only & ~(1u << cb)) return;
     static long exact = -2;   // NX2NAVI_MVOBJ_EXACT=<hex bank mask> (test): only draws with exactly these position banks
     if (exact == -2) {
         const char *e = cfg_get("NX2NAVI_MVOBJ_EXACT");
@@ -3639,7 +3694,7 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
     static struct { uint64_t frame, key; int moving; VkDescriptorBufferInfo b[17]; uint32_t have; } memo[8192];
     uint64_t key = banks;
     for (int b = 3; b <= 16; b++)
-        if (banks >> b & 1 && b != 4) key = (key ^ ex->ubo[NVN_STAGE_VS][b - 3].addr) * 0x100000001b3ull;
+        if (banks >> b & 1 && b != cb) key = (key ^ ex->ubo[NVN_STAGE_VS][b - 3].addr) * 0x100000001b3ull;
     uint32_t mi = (uint32_t)(key * 0xff51afd7ed558ccdull >> 51);
     uint32_t have = 0;
     if (memo[mi].frame == frame && memo[mi].key == key) {
@@ -3652,7 +3707,7 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
         MO.misses++;
         int moving = 0;
         for (int b = 3; b <= 16; b++) {
-            if (!(banks >> b & 1) || b == 4) continue;
+            if (!(banks >> b & 1) || b == cb) continue;
             const p_bind_buf *u = &ex->ubo[NVN_STAGE_VS][b - 3];
             int changed;
             if (u->addr && u->size && mo_prev_cached(b - 3, u, &prevb[b], &changed))
@@ -3742,7 +3797,7 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
     }
     memset(mo_ovr, 0, sizeof mo_ovr);
     for (int bk = 3; bk <= 16; bk++)   // last frame's block, or this frame's where none was found
-        mo_ovr[NVN_STAGE_VS][bk + 15] = bk == 4 ? cam : have >> bk & 1 ? prevb[bk] : ubo_info(ex, NVN_STAGE_VS, bk);
+        mo_ovr[NVN_STAGE_VS][bk + 15] = bk == cb ? cam : have >> bk & 1 ? prevb[bk] : ubo_info(ex, NVN_STAGE_VS, bk);
     mo_ovr[NVN_STAGE_FS][3] = MQ.par;
     mo_ovr_on = 1;
     int bound = mo_desc(ex, info, q);
@@ -3764,7 +3819,7 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
     q->it = d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
     q->count = (uint32_t)d->count, q->instances = d->instances > 0 ? (uint32_t)d->instances : 1;
     q->base_vertex = d->base_vertex, q->base_instance = (uint32_t)d->base_instance;
-    q->cam = ex->ubo[NVN_STAGE_VS][1].addr;
+    q->cam = ex->ubo[NVN_STAGE_VS][cb - 3].addr;
     MQ.n++;
     MO.draws++;
     for (int i = 0; i < 16; i++)   // the frame's draws per position banks and changed banks (vk_mvobj_frame_masks)

@@ -346,6 +346,7 @@ static struct {
     uint32_t mvm_slot;
     double cam_prev[16];         // last frame's view-projection (rows 3-6 of its block), for the reprojection
     int cam_slot, cam_prev_ok;   // the slot this frame writes / the other slot holds last frame's camera
+    int ocam_whole, ocam_prev_whole;   // Ocarina: this frame's / last frame's whole scene block went into its camb slot
     VkDescriptorSetLayout mv_dsl;
     VkPipelineLayout mv_layout;
     VkPipeline mv_pipe;
@@ -575,8 +576,13 @@ static void times_begin(VkCommandBuffer cb) {
 #define CAM_BYTES 256u   // vec4 rows 0-15: view, view-projection (3-6), projection, inverse view
 #define OCAM_BLOCK 0x3500u   // Ocarina's scene context block (vk_dlaa_draw)
 #define OCAM_BYTES 0xb0u     // its rows 0-10: the view and the projection
+static int ocam_objmv(void) {   // NX2NAVI_MVOBJ_OCARINA=0: no per-object motion in Ocarina (vk_exec_draw.c mo_cam_bank)
+    static int on = -1;
+    if (on < 0) on = rt_knob("MVOBJ_OCARINA", "1");
+    return on;
+}
 #define CAM_BLOCK 0x940u   // the whole block, kept for the per-object motion pass's vertex shaders (vk_exec_draw.c)
-#define CAM_SLOT 0xa00u    // camb slot stride
+#define CAM_SLOT 0x3500u   // camb slot stride: the larger of CAM_BLOCK and OCAM_BLOCK (Ocarina's per-object motion)
 #define MVM_SLOTS 16u      // frames the GPU may still be reading the reprojection blocks of
 
 // dlaa_mv.comp's push constants in its layout (std430: dz at offset 32)
@@ -749,12 +755,21 @@ static int mv_pass(VkExec *ex, struct Size *e, VkImageView zv, float jx, float j
     D.fg_cam_ok = 0;
     if (cr && have_m && D.cam_size == OCAM_BLOCK) fg_camera(cr, m);
     int s = D.cam_slot, had_prev = D.cam_prev_ok;
-    if (D.cam_size == CAM_BLOCK) {   // the whole block, for the per-object motion pass (the deferred engine's only)
+    if (D.cam_size == CAM_BLOCK) {   // the whole block, for the per-object motion pass
         VkBufferCopy bc = {cam.offset, (VkDeviceSize)s * CAM_SLOT, CAM_BLOCK};
         vkCmdCopyBuffer(cb, cam.buffer, D.camb, 1, &bc);
         full_barrier(cb);
+    } else if (D.cam_size == OCAM_BLOCK && ocam_objmv()) {   // Ocarina's whole scene context block (vertex shaders read it at c3)
+        VkDescriptorBufferInfo whole;
+        D.ocam_whole = vk_usnap_find(D.cam_addr, OCAM_BLOCK, 4, &whole);
+        if (D.ocam_whole) {
+            VkBufferCopy bc = {whole.offset, (VkDeviceSize)s * CAM_SLOT, OCAM_BLOCK};
+            vkCmdCopyBuffer(cb, whole.buffer, D.camb, 1, &bc);
+            full_barrier(cb);
+        }
     }
     D.cam_slot ^= 1, D.cam_prev_ok = cr != NULL;
+    D.ocam_prev_whole = D.ocam_whole, D.ocam_whole = 0;
     if (cr) memcpy(D.cam_prev, cur_vp, sizeof cur_vp);
     if (!had_prev || !have_m) {   // nothing to reproject into: zero motion, new history
         e->chars_ok = e->dist_ok = 0;
@@ -829,7 +844,9 @@ static int mv_pass(VkExec *ex, struct Size *e, VkImageView zv, float jx, float j
     vk_mvcheck_camera(cb, e->mv, w, h, jx, jy);   // NX2NAVI_MV_CHECK (test)
     // the characters' own motion over the camera's (vk_exec_draw.c, per-object motion)
     uint64_t c0 = T.on > 0 ? kern_now_ns() : 0;
-    if (D.cam_size == CAM_BLOCK && vk_mvobj_execute(ex, D.cam_addr, e->mv_view, zv, D.depth.format, w, h)) full_barrier(cb);
+    if ((D.cam_size == CAM_BLOCK || (D.cam_size == OCAM_BLOCK && ocam_objmv())) &&
+        vk_mvobj_execute(ex, D.cam_addr, e->mv_view, zv, D.depth.format, w, h))
+        full_barrier(cb);
     if (T.on > 0) T.cpu_mv += kern_now_ns() - c0;
     times_mark(cb, T_OBJ);
     if (T.on > 0) T.used[T.slot] = 1;   // the DLSS marks follow in evaluate
@@ -845,10 +862,19 @@ static int mv_pass(VkExec *ex, struct Size *e, VkImageView zv, float jx, float j
 
 // Last frame's camera block for the per-object motion pass, recorded before this frame's mv_pass: that pass writes
 // this frame's into slot cam_slot and leaves the other slot, last frame's, as it is. 0: none (no history).
+uint64_t vk_dlaa_cam_addr(uint32_t *size) {
+    if (size) *size = D.cam_size;
+    return D.cam_addr;
+}
+
 int vk_dlaa_prev_camera(VkDescriptorBufferInfo *out, float jitter[2]) {
     if (!dl_active() || !D.cam_prev_ok || !D.camb) return 0;
-    if (D.cam_size != CAM_BLOCK) return 0;   // the per-object pass knows the deferred engine's block only
-    *out = (VkDescriptorBufferInfo){D.camb, (VkDeviceSize)(D.cam_slot ^ 1) * CAM_SLOT, CAM_BLOCK};
+    if (D.cam_size == OCAM_BLOCK) {   // Ocarina: when last frame's whole block was copied
+        if (!ocam_objmv() || !D.ocam_prev_whole) return 0;
+    } else if (D.cam_size != CAM_BLOCK) {
+        return 0;
+    }
+    *out = (VkDescriptorBufferInfo){D.camb, (VkDeviceSize)(D.cam_slot ^ 1) * CAM_SLOT, D.cam_size};
     jitter[0] = D.jit_ok ? D.jx : 0.0f, jitter[1] = D.jit_ok ? D.jy : 0.0f;
     return 1;
 }
