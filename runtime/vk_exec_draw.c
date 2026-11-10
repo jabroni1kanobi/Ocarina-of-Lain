@@ -524,6 +524,21 @@ static int int_view_format(uint32_t nvn, VkFormat *vk) {
     return 0;
 }
 
+// The translator's TextureFormat code of an integer Vulkan format (int_view_format's table); 0: not one.
+static int int_vk_format_code(VkFormat f) {
+    static const uint16_t N[] = {NVN_FORMAT_R8UI, NVN_FORMAT_R8I, NVN_FORMAT_R16UI, NVN_FORMAT_R16I, NVN_FORMAT_R32UI,
+                                 NVN_FORMAT_R32I, NVN_FORMAT_RG8UI, NVN_FORMAT_RG8I, NVN_FORMAT_RG16UI, NVN_FORMAT_RG16I,
+                                 NVN_FORMAT_RG32UI, NVN_FORMAT_RG32I, NVN_FORMAT_RGBA8UI, NVN_FORMAT_RGBA8I,
+                                 NVN_FORMAT_RGBA16UI, NVN_FORMAT_RGBA16I, NVN_FORMAT_RGBA32UI, NVN_FORMAT_RGBA32I,
+                                 NVN_FORMAT_RGB10A2UI};
+    for (size_t i = 0; i < sizeof N / sizeof *N; i++) {
+        VkFormat g = VK_FORMAT_UNDEFINED;
+        int code = int_view_format(N[i], &g);
+        if (g == f) return code;
+    }
+    return 0;
+}
+
 // Bytes per texel of the formats a storage view may reinterpret (int_view_format's and the 32/64/128-bit float and
 // unorm ones they alias); 0 unknown.
 static int texel_bytes(VkFormat f) {
@@ -848,9 +863,15 @@ static uint8_t format_of_handle(uint64_t h) {
     if (img && hv && v.set_format && int_view_format(v.format, NULL) && logged < 8)
         logged++, rt_log("vk: image view format: handle %#llx view nvn format %#x on vk format %d -> %d",
                          (unsigned long long)h, v.format, img->format, int_view_format(v.format, NULL));
-    if (!img || !hv || !v.set_format || !int_view_format(v.format, &f) || texel_bytes(f) != texel_bytes(img->format) || !texel_bytes(f))
-        return 0;
-    return (uint8_t)int_view_format(v.format, NULL);
+    if (img && hv && v.set_format && int_view_format(v.format, &f) && texel_bytes(f) == texel_bytes(img->format) && texel_bytes(f))
+        return (uint8_t)int_view_format(v.format, NULL);
+    // An image whose own format is integer (no view reinterprets it): the validation layer found R16G16_UINT images
+    // bound to format-less storage images the translator declared float (VUID-vkCmdDispatch-format-07753, compute
+    // cp_i_tcb_48_; lab backlog 17): undefined on AMD. NX2NAVI_IMG_OWN_INT=0 restores the old answer.
+    static int own = -1;
+    if (own < 0) own = rt_knob("IMG_OWN_INT", "1");
+    if (!img || !own) return 0;
+    return (uint8_t)int_vk_format_code(storage_view_format(img, &v, hv));
 }
 
 // The answers of stage st for the slots in mask; the types of other slots stay zero.
