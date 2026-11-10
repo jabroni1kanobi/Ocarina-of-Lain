@@ -244,7 +244,7 @@ static int row_text(const char *key, const char *label, const char *desc, const 
         float vx = right - tv;
         ImVec4 vclip(vx, p.y, right, p.y + h);
         dl->AddText(font, vfs, ImVec2(vx, ty + (fs - vfs) * 0.5f),
-                    off ? kGrey : v.is_default ? IM_COL32(232, 222, 198, 255) : IM_COL32(255, 255, 255, 255), v.value, NULL,
+                    off ? kGrey : v.is_default ? IM_COL32(226, 220, 240, 255) : IM_COL32(255, 255, 255, 255), v.value, NULL,
                     0, &vclip);
         if (!v.arrows && !movable) value_left = vx;
     }
@@ -519,7 +519,7 @@ int opt_bind_row(const char *key, const char *label, UiTextId desc, const char *
     bind_columns(p.x, w, cx, &cw);
     ImDrawList *dl = ImGui::GetWindowDrawList();
     float pad = 6 * g_scale;
-    fit_text(dl, p.x + 16 * g_scale, cx[0] - fs * 0.3f, p.y, h, IM_COL32(240, 236, 224, 255), label, false);
+    fit_text(dl, p.x + 16 * g_scale, cx[0] - fs * 0.3f, p.y, h, IM_COL32(238, 234, 248, 255), label, false);
     int result = -1;
     bool row_foc = false, row_hov = false;
     for (int c = 0; c < 3; c++) {

@@ -46,6 +46,18 @@ static struct Art {
 static std::atomic<int> g_state;   // 0 not started, 1 decoding, 2 decoded, 3 nothing to show
 static VkSampler g_sampler;
 
+// Ocarina of Lain: the game's gold and umber interface art turned to the Wired's violet. Each texel keeps its
+// brightness (Rec. 601 luma) and takes a purple of that brightness: the gold rims become lavender, the brown fills deep
+// violet, the shadows stay dark. Alpha is untouched, so shapes and edges stay as the game drew them.
+static void lain_tint(uint8_t *rgba, uint32_t w, uint32_t h) {
+    for (size_t i = 0, n = (size_t)w * h; i < n; i++) {
+        uint8_t *p = rgba + i * 4;
+        const float y = 0.299f * p[0] + 0.587f * p[1] + 0.114f * p[2];
+        const float r = y * 0.85f, g = y * 0.62f, b = y * 1.25f + 8;
+        p[0] = (uint8_t)(r > 255 ? 255 : r), p[1] = (uint8_t)(g > 255 ? 255 : g), p[2] = (uint8_t)(b > 255 ? 255 : b);
+    }
+}
+
 static void decode_all(void *) {
     size_t n = 0;
     uint8_t *bntx = menu_asset_load(COMMON_BNTX, &n);
@@ -53,7 +65,8 @@ static void decode_all(void *) {
     if (!bntx) rt_log("menu: %s could not be read from the RomFS", COMMON_BNTX);
     for (int i = 0; bntx && i < MENU_ART_COUNT; i++) {
         Art &a = g_art[i];
-        if (menu_asset_texture(bntx, n, kNames[i], &a.rgba, &a.w, &a.h)) got++, skin_art_prepare(i, a.rgba, a.w, a.h);
+        if (menu_asset_texture(bntx, n, kNames[i], &a.rgba, &a.w, &a.h))
+            got++, lain_tint(a.rgba, a.w, a.h), skin_art_prepare(i, a.rgba, a.w, a.h);
         else rt_log("menu: interface texture %s not decoded (archive of %llu bytes)", kNames[i], (unsigned long long)n);
     }
     free(bntx);

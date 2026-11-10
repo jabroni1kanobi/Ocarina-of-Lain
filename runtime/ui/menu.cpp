@@ -1235,7 +1235,7 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
         float sy = win_p.y + y, fh = ImGui::GetFrameHeight();
         // within the bottom row's own height: above it the page's last row may still show
         menu_art_draw(ImGui::GetWindowDrawList(), MENU_ART_GUIDE_BAR, ImVec2(win_p.x + st.WindowPadding.x, sy),
-                      ImVec2(win_p.x + win_s.x - st.WindowPadding.x, sy + fh), IM_COL32(96, 70, 36, 170));
+                      ImVec2(win_p.x + win_s.x - st.WindowPadding.x, sy + fh), IM_COL32(52, 30, 80, 170));
     }
     if (!cfg_last_save_ok()) {   // stays until a save succeeds; the settings hold for the session
         ImGui::SetCursorPosY(y + st.FramePadding.y);

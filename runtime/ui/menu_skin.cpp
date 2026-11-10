@@ -294,15 +294,15 @@ void skin_atlas_fill(ImFontAtlas *fa) {
 // The button from the game's layers; false while they are not there. plate: the selected tab's plate under the lines.
 static bool button_art(ImDrawList *dl, ImVec2 a, ImVec2 b, float lift, bool dim, bool plate) {
     if (!have_art({MENU_ART_BTN_RIM, MENU_ART_BTN_FILL, MENU_ART_BTN_GRAIN, MENU_ART_BTN_EDGE, MENU_ART_BTN_LINE})) return false;
-    static const int fill0[3] = {100, 76, 42}, fill1[3] = {128, 99, 58}, grain0[3] = {150, 118, 76}, grain1[3] = {178, 144, 96};
+    static const int fill0[3] = {64, 36, 104}, fill1[3] = {86, 50, 136}, grain0[3] = {108, 72, 164}, grain1[3] = {132, 92, 198};   // Lain violets
     static const int grey_fill[3] = {76, 67, 56}, grey_grain[3] = {128, 116, 100};
     const float t = (b.y - a.y) / kBtnBoxH;
-    btn_layer(dl, MENU_ART_BTN_RIM, a, b, t, rgba(20, 14, 8, 0.85f));
+    btn_layer(dl, MENU_ART_BTN_RIM, a, b, t, rgba(14, 6, 24, 0.85f));
     btn_layer(dl, MENU_ART_BTN_FILL, a, b, t, dim ? mix(grey_fill, grey_fill, 0, 1) : mix(fill0, fill1, lift, 1));
     btn_layer(dl, MENU_ART_BTN_GRAIN, a, b, t, dim ? mix(grey_grain, grey_grain, 0, 0.26f) : mix(grain0, grain1, lift, 0.32f), true);
-    if (plate) slice(dl, MENU_ART_TAB_SELECT, a, b, kTabL, kTabT, kTabR, kTabB, 30, t, rgba(232, 186, 104, 0.55f));
-    btn_layer(dl, MENU_ART_BTN_EDGE, a, b, t, dim ? rgba(98, 88, 74, 1) : rgba(140, 116, 74, 1));
-    btn_layer(dl, MENU_ART_BTN_LINE, a, b, t, dim ? rgba(112, 102, 88, 1) : rgba(150 + (int)(24 * lift), 124 + (int)(20 * lift), 80 + (int)(12 * lift), 1));
+    if (plate) slice(dl, MENU_ART_TAB_SELECT, a, b, kTabL, kTabT, kTabR, kTabB, 30, t, rgba(196, 150, 255, 0.55f));
+    btn_layer(dl, MENU_ART_BTN_EDGE, a, b, t, dim ? rgba(98, 88, 74, 1) : rgba(104, 74, 156, 1));
+    btn_layer(dl, MENU_ART_BTN_LINE, a, b, t, dim ? rgba(112, 102, 88, 1) : rgba(150 + (int)(24 * lift), 112 + (int)(20 * lift), 214 + (int)(12 * lift), 1));
     return true;
 }
 
@@ -402,8 +402,8 @@ void skin_panel(ImDrawList *dl, ImVec2 a, ImVec2 b, float s, float alpha) {
         // the panel's own texture inside its box, with the button's edge and inset line at a size that suits a large box
         const float k = 0.62f * s;
         slice(dl, MENU_ART_PANEL_FILL, a, b, kPanelM, kPanelM, kPanelW - kPanelM, kPanelH - kPanelM, 40, k, rgba(255, 255, 255, alpha), true, true);
-        btn_layer(dl, MENU_ART_BTN_EDGE, a, b, k, rgba(126, 104, 68, 1));
-        btn_layer(dl, MENU_ART_BTN_LINE, a, b, k, rgba(150, 124, 80, 1));
+        btn_layer(dl, MENU_ART_BTN_EDGE, a, b, k, rgba(96, 66, 146, 1));
+        btn_layer(dl, MENU_ART_BTN_LINE, a, b, k, rgba(150, 112, 214, 1));
         return;
     }
     dl->AddRectFilled(a, b, rgba(20, 15, 10, 0.85f * alpha));
