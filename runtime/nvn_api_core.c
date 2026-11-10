@@ -670,17 +670,21 @@ NVN_API(nvnQueueSubmitCommands) {
     if (finish_mask && f && (finish_mask == -1 || (idx < 63 && (finish_mask >> idx & 1)))) gfx_backend()->fence_wait(f, UINT64_MAX);
 }
 
-// The producer (1.2.1 main f_70008c6460) releases the read lock on obj+0x538 at lr 0x70008c70c8; when
+// The producer (1.2.1 main) releases the read lock on obj+0x538; when
 // [obj+0x529] == [obj+0x528] (x19 = obj) it goes on to rewrite the back half. Waits off the core, at most ~400 ms.
+// No return-address check: the landed build's lift addresses differ from the original binary's, which is why the
+// guard never fired and the LOD uniforms raced one frame stale at fixed spots (Kokiri pops).
 static void obs_release_read(Cpu *c) {
-    uint64_t lr = c->x[30], obj = c->x[19];
+    uint64_t lr = c->x[30], lock = c->x[0], obj = lock >= 0x538 ? lock - 0x538 : 0;
     rt_original(c);
-    if (lr != 0x70008c70c8ull) return;
+    if (lr != 0x70008c70c8ull && lr != 0x70004099a0ull) return;
     static int on = -1;
     if (on < 0) {
         on = cfg_bool("NX2NAVI_LOD_GUARD");
     }
-    if (!on || *(volatile uint8_t *)(uintptr_t)(obj + 0x528) != *(volatile uint8_t *)(uintptr_t)(obj + 0x529)) return;
+    uint8_t b0, b1;
+    if (!on || !obj || !plat_mem_read(obj + 0x528, &b0, 1) || !plat_mem_read(obj + 0x529, &b1, 1) || b0 != b1)
+        return;
     uint64_t e = __atomic_load_n(&lod_entered, __ATOMIC_SEQ_CST);
     if (!e) return;
     NVN_BLOCKING();
