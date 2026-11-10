@@ -14,7 +14,9 @@
 // (four rows of one 16-byte column before the next column). Found on Ocarina of Time's packaged textures: with it the
 // ASTC 4x4 title logo and BC4 masks decode without seams (an edge-continuity search over all 120 orders of the five
 // address bits picks it for both; OCARINA-BRINGUP.md round 18). Block and level arithmetic are unchanged.
+#include "cfg.h"
 #include "host.h"
+#include "platform/platform.h"
 #include "tex.h"
 #include <string.h>
 
@@ -62,13 +64,14 @@ int nvn_deswizzle_geom(const nvn_texdesc *d, unsigned level, unsigned layer,
 
 // nvn_bl_offset per row instead of per 16 bytes: within a row, GOB column k starts k blocks further, and the four
 // 16-byte segments of a GOB row (x % 64 = 0, 16, 32, 48) sit at 0, 32, 256 and 288 of it (Switch 2: 0, 64, 256, 320).
-void tex_bl_copy(uint8_t *bl, uint8_t *lin, size_t pitch, uint32_t row_bytes, uint32_t rows, uint32_t slices,
-                 unsigned th, unsigned td, int to_linear) {
+// Rows [y0, y1) of every slice.
+static void bl_rows(uint8_t *bl, uint8_t *lin, size_t pitch, uint32_t row_bytes, uint32_t rows, uint32_t slices,
+                    unsigned th, unsigned td, int to_linear, uint32_t y0, uint32_t y1) {
     static const uint32_t seg_x1[4] = {0, 32, 256, 288}, seg_nvn2[4] = {0, 64, 256, 320};
     const uint32_t *seg = gob_nvn2() ? seg_nvn2 : seg_x1;
     uint64_t block = 512ull << th << td;
     for (uint32_t z = 0; z < slices; z++)
-        for (uint32_t y = 0; y < rows; y++) {
+        for (uint32_t y = y0; y < y1; y++) {
             uint8_t *row = lin + ((size_t)z * rows + y) * pitch, *g = bl + nvn_bl_offset(0, y, z, row_bytes, rows, th, td);
             uint32_t x = 0;
             if (to_linear)
@@ -82,6 +85,96 @@ void tex_bl_copy(uint8_t *bl, uint8_t *lin, size_t pitch, uint32_t row_bytes, ui
                 if (to_linear) memcpy(row + x, g + seg[s], n); else memcpy(g + seg[s], row + x, n);
             }
         }
+}
+
+// A large copy's rows spread over a small persistent pool (NX2NAVI_DESWIZZLE_MT=1; OFF by default), the caller one of the
+// workers. A scene cut makes thousands of textures in one frame on the render thread, and their de-swizzle copies,
+// bound by memory reads of the game's storage, were 67 of its 734 samples (lab pfi5, the intro's Deku Tree cut). Copies
+// under MT_MIN_BYTES stay on the calling thread (waking the pool costs about as much); a pool busy with another
+// thread's copy leaves the caller on its own (trylock), as tex_astc_mt.c does. Lab dz*2 (intro route, 3 pairs): the
+// scene-cut frame 785/888/842 ms with the pool vs 817/845/806 without, and the whole route slower (frame 13.8 -> 14.1 ms,
+// replay 3.3 -> 3.6-4.2: the workers compete with the game's threads), so it stays off.
+#define MT_MIN_BYTES (512u << 10)
+#define MT_MAX 6
+static struct {
+    PlatOnce once;
+    PlatMutex lock, busy;
+    PlatCond work, done;
+    int threads, active, on;
+    uint64_t gen;
+    volatile int32_t next;
+    uint32_t chunk;
+    uint8_t *bl, *lin;
+    size_t pitch;
+    uint32_t row_bytes, rows, slices;
+    unsigned th, td;
+    int to_linear;
+} M = {PLAT_ONCE_INIT, .lock = PLAT_MUTEX_INIT, .busy = PLAT_MUTEX_INIT, .work = PLAT_COND_INIT, .done = PLAT_COND_INIT};
+
+static void claim(void) {
+    for (;;) {
+        int32_t y0 = plat_xadd32(&M.next, (int32_t)M.chunk);
+        if ((uint32_t)y0 >= M.rows) return;
+        uint32_t y1 = (uint32_t)y0 + M.chunk;
+        bl_rows(M.bl, M.lin, M.pitch, M.row_bytes, M.rows, M.slices, M.th, M.td, M.to_linear, (uint32_t)y0,
+                y1 < M.rows ? y1 : M.rows);
+    }
+}
+
+static void worker(void *arg) {
+    (void)arg;
+    uint64_t seen = 0;
+    plat_mutex_lock(&M.lock);
+    for (;;) {
+        while (M.gen == seen) plat_cond_wait(&M.work, &M.lock);
+        seen = M.gen;
+        plat_mutex_unlock(&M.lock);
+        claim();
+        plat_mutex_lock(&M.lock);
+        if (!--M.active) plat_cond_broadcast(&M.done);
+    }
+}
+
+static void pool_init(void *param) {
+    (void)param;
+    M.on = rt_knob("DESWIZZLE_MT", "0");
+    if (!M.on) return;
+    int cpus = (int)plat_cpu_usable() - 2;
+    int n = (cpus < 1 ? 1 : cpus > MT_MAX ? MT_MAX : cpus) - 1;
+    for (int i = 0; i < n; i++) {
+        if (!plat_thread_spawn(worker, NULL, "deswizzle", 0)) break;
+        M.threads++;
+    }
+    rt_log("tex: %d de-swizzle workers for copies of %u KiB or more (NX2NAVI_DESWIZZLE_MT=1)", M.threads,
+           MT_MIN_BYTES >> 10);
+}
+
+void tex_bl_copy(uint8_t *bl, uint8_t *lin, size_t pitch, uint32_t row_bytes, uint32_t rows, uint32_t slices,
+                 unsigned th, unsigned td, int to_linear) {
+    if ((uint64_t)row_bytes * rows * slices < MT_MIN_BYTES || rows < 16) {
+        bl_rows(bl, lin, pitch, row_bytes, rows, slices, th, td, to_linear, 0, rows);
+        return;
+    }
+    plat_once(&M.once, pool_init, NULL);
+    if (!M.threads || !plat_mutex_trylock(&M.busy)) {
+        bl_rows(bl, lin, pitch, row_bytes, rows, slices, th, td, to_linear, 0, rows);
+        return;
+    }
+    plat_mutex_lock(&M.lock);
+    M.bl = bl, M.lin = lin, M.pitch = pitch, M.row_bytes = row_bytes, M.rows = rows, M.slices = slices;
+    M.th = th, M.td = td, M.to_linear = to_linear;
+    uint32_t parts = (uint32_t)(M.threads + 1) * 4;
+    M.chunk = rows / parts ? rows / parts : 1;
+    M.next = 0;
+    M.active = M.threads;
+    M.gen++;
+    plat_cond_broadcast(&M.work);
+    plat_mutex_unlock(&M.lock);
+    claim();
+    plat_mutex_lock(&M.lock);
+    while (M.active) plat_cond_wait(&M.done, &M.lock);
+    plat_mutex_unlock(&M.lock);
+    plat_mutex_unlock(&M.busy);
 }
 
 static int move(const nvn_texdesc *d, unsigned level, unsigned layer, uint8_t *bl, uint8_t *lin, size_t pitch, int to_linear) {

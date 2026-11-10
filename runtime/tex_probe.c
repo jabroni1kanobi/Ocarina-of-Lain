@@ -464,6 +464,7 @@ static tex_t make_tex(pool_t *pool, uint64_t off, int format, uint32_t w, uint32
     t.d.target = 1, t.d.format = format, t.d.width = w, t.d.height = h, t.d.depth = 1, t.d.levels = levels;
     nvn_tex_layout(&t.d, &t.L);
     t.pool = pool, t.off = (int64_t)off, t.mem = pool->mem + off, t.serial = serial;
+    t.pool_flags = (uint16_t)pool->flags;   // as nvnTextureInitialize records it (tex_mirrored reads this, not the pool)
     return t;
 }
 
@@ -504,7 +505,9 @@ static int test_textures(pool_t *tpool, pool_t *phys) {
     tex_t t = make_tex(tpool, 0, 0x25, 200, 120, 3, 1);
     if (fill_storage(&t, lin)) return 1;
     const VkTexImage *img = vk_texture_get(&t);
-    GCHECK(img && img->mirrored && img->levels == 3 && img->format == VK_FORMAT_R8G8B8A8_UNORM, "RGBA8 texture image");
+    GCHECK(img && img->mirrored && img->levels == 3 && img->format == VK_FORMAT_R8G8B8A8_UNORM,
+           "RGBA8 texture image (image %s, mirrored %d, levels %u, format %d)", img ? "made" : "missing",
+           img ? (int)img->mirrored : -1, img ? (unsigned)img->levels : 0u, img ? (int)img->format : -1);
     for (unsigned lv = 0; lv < 3; lv++)
         if (read_back(&t, lv, lin, 1, "RGBA8")) return 1;
     // CPU writes to the storage: write watch -> re-upload on the next use
@@ -536,14 +539,22 @@ static int test_textures(pool_t *tpool, pool_t *phys) {
     vk_write_texels(&g, NULL, &all, gl[0], 256, 256 * 64);
     if (read_back(&g, 0, gl, 0, "physical-pool RGBA8 WriteTexels")) return 1;
 
-    // a slot of a finalized texture follows the live texture at the same storage
+    // A CPU-written slot of a texture finalized after the slot was registered is stale (vk_texture.c slot_resolve): it
+    // follows another image at its storage only for GPU-written content, and a CPU-provided b2 there is not that (the
+    // Basic Controls caption fix), so it resolves to nothing instead of reviving b from storage being freed (the
+    // Kokiri access violation fix). Registered again after the release, the slot is live and gets b2's storage.
     vk_texture_register(5, &b, NULL);
     vk_texture_release(&b);
     tex_t b2 = make_tex(tpool, 0x40000, 0x25, 16, 12, 1, 4);
     const VkTexImage *live = vk_texture_get(&b2);
-    VkImage live_img = live ? live->image : VK_NULL_HANDLE;
     const VkTexImage *slot = vk_texture_by_id(5, NULL, NULL);
-    GCHECK(live && slot && slot->image == live_img, "slot 5 does not follow the live texture at its storage");
+    // (stale when b's released entry is still there; when b2's creation replaced it, the slot gets an image of its own
+    // geometry, entry_of): never b2's image
+    GCHECK(live && (!slot || (slot->image != live->image && slot->format == VK_FORMAT_BC1_RGBA_UNORM_BLOCK)),
+           "slot 5 (CPU-written, finalized) follows the CPU-provided texture of another geometry at its storage");
+    vk_texture_register(5, &b2, NULL);
+    slot = vk_texture_by_id(5, NULL, NULL);
+    GCHECK(slot && slot->image == live->image, "slot 5 registered again does not resolve to the live texture");
     samp_par sp;
     memset(&sp, 0, sizeof sp);
     sp.minf = NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR, sp.magf = NVN_MAG_FILTER_LINEAR, sp.ws = sp.wt = sp.wr = NVN_WRAP_MODE_REPEAT;
