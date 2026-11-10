@@ -1338,7 +1338,10 @@ int plat_stderr_path(char *out, size_t cap) {
 int __llvm_profile_dump(void);
 #endif
 
+void (*plat_before_exit)(void);
+
 void plat_exit(int code) {
+    if (plat_before_exit) plat_before_exit();
 #ifdef NX2NAVI_PGO_GEN
     __llvm_profile_dump();
 #endif

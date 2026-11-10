@@ -50,7 +50,95 @@ static char g_log_early[32768];
 static size_t g_log_early_n;
 static uint64_t g_log_bytes;
 
+// The writer thread. Once log_open has run, rt_log_raw only copies a line into a ring and the writer thread makes the
+// stderr and file writes: a disk that stalls (antivirus scanning the log, a busy drive) never stalls the thread that
+// logged. Before, a game or render thread wrote each line itself, and NX2NAVI_PROFILE_SLOW found up to 14 ms of a slow
+// frame's main thread in those writes. Lines keep their order; a ring that stays full for 50 ms drops the line and the
+// writer reports how many. plat_exit flushes the ring first (rt_log_flush), so a fatal report is complete.
+// NX2NAVI_LOG_SYNC=1 writes on the calling thread as before.
+#define LOG_RING (4u << 20)
+static char *g_ring;
+static size_t g_ring_head, g_ring_tail;   // bytes written in / taken out, ever
+static uint64_t g_ring_dropped;
+static PlatMutex g_ring_lock = PLAT_MUTEX_INIT;
+static PlatCond g_ring_data = PLAT_COND_INIT, g_ring_space = PLAT_COND_INIT;
+static uint64_t g_writer_tid;
+
+static void log_emit(const char *p, size_t n);
+
+static void log_writer(void *arg) {
+    (void)arg;
+    g_writer_tid = plat_thread_id();
+    for (;;) {
+        plat_mutex_lock(&g_ring_lock);
+        while (g_ring_head == g_ring_tail) plat_cond_wait(&g_ring_data, &g_ring_lock);
+        size_t at = g_ring_tail % LOG_RING, n = g_ring_head - g_ring_tail;
+        if (n > LOG_RING - at) n = LOG_RING - at;   // up to the ring's end; the rest next time
+        uint64_t dropped = g_ring_dropped;
+        g_ring_dropped = 0;
+        plat_mutex_unlock(&g_ring_lock);
+        log_emit(g_ring + at, n);
+        if (dropped) {
+            char m[96];
+            int k = snprintf(m, sizeof m, "[host] log: %llu lines dropped (the writer fell behind)\n", (unsigned long long)dropped);
+            log_emit(m, (size_t)k);
+        }
+        plat_mutex_lock(&g_ring_lock);
+        g_ring_tail += n;
+        plat_cond_broadcast(&g_ring_space);
+        plat_mutex_unlock(&g_ring_lock);
+    }
+}
+
+// Waits (at most 2 s) until the writer has written every line queued so far. Not on the writer thread itself.
+void rt_log_flush(void) {
+    if (!__atomic_load_n(&g_ring, __ATOMIC_ACQUIRE) || plat_thread_id() == g_writer_tid) return;
+    uint64_t t0 = plat_now_ns();
+    plat_mutex_lock(&g_ring_lock);
+    while (g_ring_head != g_ring_tail && plat_now_ns() - t0 < 2000000000ull) plat_cond_wait_ns(&g_ring_space, &g_ring_lock, 50000000ull);
+    plat_mutex_unlock(&g_ring_lock);
+    fflush(stderr);
+}
+
+static void log_writer_start(void) {
+    const char *s = cfg_get("NX2NAVI_LOG_SYNC");
+    if (s && *s && strcmp(s, "0")) return;
+    char *r = malloc(LOG_RING);
+    if (!r) return;
+    plat_before_exit = rt_log_flush;
+    __atomic_store_n(&g_ring, r, __ATOMIC_RELEASE);
+    if (!plat_thread_new(log_writer, NULL, "log writer")) {
+        __atomic_store_n(&g_ring, NULL, __ATOMIC_RELEASE);
+        plat_before_exit = NULL;
+        free(r);
+    }
+}
+
 void rt_log_raw(const char *p, size_t n) {
+    if (__atomic_load_n(&g_ring, __ATOMIC_ACQUIRE) && n <= LOG_RING / 4 && plat_thread_id() != g_writer_tid) {
+        uint64_t t0 = 0;
+        plat_mutex_lock(&g_ring_lock);
+        while (LOG_RING - (g_ring_head - g_ring_tail) < n) {   // full: wait for the writer, at most 50 ms
+            if (!t0) t0 = plat_now_ns();
+            if (plat_now_ns() - t0 > 50000000ull) {
+                g_ring_dropped++;
+                plat_mutex_unlock(&g_ring_lock);
+                return;
+            }
+            plat_cond_wait_ns(&g_ring_space, &g_ring_lock, 5000000ull);
+        }
+        size_t at = g_ring_head % LOG_RING, k = n < LOG_RING - at ? n : LOG_RING - at;
+        memcpy(g_ring + at, p, k);
+        memcpy(g_ring, p + k, n - k);
+        g_ring_head += n;
+        plat_cond_signal(&g_ring_data);
+        plat_mutex_unlock(&g_ring_lock);
+        return;
+    }
+    log_emit(p, n);
+}
+
+static void log_emit(const char *p, size_t n) {
     fwrite(p, 1, n, stderr);
     int state = __atomic_load_n(&g_log_state, __ATOMIC_ACQUIRE);
     if (state == LOG_EARLY) {
@@ -120,6 +208,7 @@ static void log_open(int game) {
     }
     if (!g_log_file) {
         __atomic_store_n(&g_log_state, LOG_OFF, __ATOMIC_RELEASE);
+        log_writer_start();
         return;
     }
     size_t n = __atomic_load_n(&g_log_early_n, __ATOMIC_RELAXED);
@@ -127,6 +216,7 @@ static void log_open(int game) {
     plat_append_write(g_log_file, g_log_early, n);
     g_log_bytes = n;
     __atomic_store_n(&g_log_state, LOG_FILE, __ATOMIC_RELEASE);
+    log_writer_start();
     rt_log("log: %s", g_log_path);
 }
 

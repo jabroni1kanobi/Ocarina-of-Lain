@@ -30,7 +30,7 @@ uint64_t kern_thread_gid(const void *t);   // a Cpu's thread (c->thread): its gu
 extern int waitlog_on;
 void waitlog_init(void);
 int waitlog_blocking(uint32_t imm);
-void waitlog_svc(const Cpu *c, uint32_t imm, uint64_t a0, uint64_t a1, uint64_t ns);
+void waitlog_svc(const Cpu *c, uint32_t imm, uint64_t a0, uint64_t a1, uint64_t t0, uint64_t t1);
 void waitlog_frame(uint64_t frame, uint64_t interval_ns);
 void kern_seed_tls(void);   // put the running thread's TLS where the SDK looks for it (TLR+0x1F0)
 

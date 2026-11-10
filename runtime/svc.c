@@ -149,7 +149,7 @@ void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
             __atomic_store_n(d, n, __ATOMIC_RELAXED);
             if (!n && kern_preempt_pending(t)) kern_host_left(t);
         }
-        waitlog_svc(c, imm, a0, a1, kern_now_ns() - t0);
+        waitlog_svc(c, imm, a0, a1, t0, kern_now_ns());
         return;
     }
     if (__builtin_expect(!kern_host_track || !c->thread, 1)) {

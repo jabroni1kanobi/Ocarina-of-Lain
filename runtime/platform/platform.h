@@ -258,6 +258,7 @@ void *plat_aligned_alloc(size_t size, size_t align);      // free with plat_alig
 void plat_aligned_free(void *p);
 
 // ---- process
+extern void (*plat_before_exit)(void);   // called first by plat_exit when set (main.c: the log writer's flush)
 _Noreturn void plat_exit(int code);       // ends the process at once: other threads stop, no atexit handlers run
 int plat_setenv(const char *name, const char *value);    // value NULL removes it; 1 on success
 uint32_t plat_process_id(void);
