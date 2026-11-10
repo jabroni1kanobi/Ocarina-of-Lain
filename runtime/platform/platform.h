@@ -37,6 +37,7 @@ uint64_t plat_thread_cpu_ns(uint32_t tid);  // CPU time of the thread with id ti
 // The logical processors the process may use (bit n = processor n, the first 64), into *all, and the lowest of each
 // physical core among them into *first; returns the number of physical cores, 0 when unknown.
 int plat_cpu_cores(uint64_t *all, uint64_t *first);
+int plat_reserve_core(int core, uint64_t *got);   // the calling thread gets a physical core to itself (win32.c)
 int plat_process_affinity(uint64_t mask);   // every thread of the process to the processors in mask; 1 on success
 
 // Interrupting a thread (kernel.c's asynchronous preemption). A thread makes its own handle; another thread stops it

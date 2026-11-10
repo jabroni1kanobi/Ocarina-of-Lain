@@ -2359,8 +2359,12 @@ static int push_skip_on(void) {   // NX2NAVI_PUSH_SKIP=0: every graphics draw pu
 // the views cached per submission. The census counts are added again. A build that copied guest bytes into transient
 // memory (an unaligned host range) is never skipped after: the copy may differ. B.res_valid says the sets bound hold
 // the last build; vk_exec_draw_new_cb's memset clears it, and every build clears it until it ends.
-// NX2NAVI_BIND_SKIP=0 builds every draw; =check builds every draw and stops when a draw with equal inputs gets other
-// writes, census counts or descriptor commands.
+// NX2NAVI_BIND_SKIP=1 turns the skip on (off by default since 2026-11-10); =check builds every draw and stops when a
+// draw with equal inputs gets other writes, census counts or descriptor commands. Off because on the RX 9070 the
+// Khronos validation layer found skipped draws whose push set lacks the vertex stage's c3 binding (vkCmdDrawIndexed,
+// 'VkDescriptorSet 0x0 does not have a binding for [Set 0, Binding 4, vp_c3]': 10 with the skip, 0 without), and
+// building every draw was also cheaper: with NX2NAVI_REPLAY_PIN the Kokiri route's replay took 7.5 ms a frame instead of
+// 8.0, and frames over 20 ms fell to 0-1 per run (lab c1s).
 static int bind_skip_on(void) {
     if (RS.on < 0) {
         const char *e = cfg_value("NX2NAVI_BIND_SKIP");

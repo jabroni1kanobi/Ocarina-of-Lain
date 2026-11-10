@@ -1340,6 +1340,8 @@ int __llvm_profile_dump(void);
 
 void (*plat_before_exit)(void);
 
+int plat_reserve_core(int core, uint64_t *got) { (void)core; *got = 0; return -1; }
+
 void plat_exit(int code) {
     if (plat_before_exit) plat_before_exit();
 #ifdef NX2NAVI_PGO_GEN

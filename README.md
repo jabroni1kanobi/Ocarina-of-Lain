@@ -20,6 +20,7 @@ No game files are in this repo. You need your own copy of the game.
 | Float bits kept on mesh and task shaders | Leaf shadows no longer cover the whole shadow map: large GPU saving in wide outdoor views | `spirv_float_bits` in `runtime/gfx_shader.c` |
 | Frame wait after the first submission | Flashes in Kokiri gone. Set `submit_finish = 0x1` in `nx2navi.ini` | your `nx2navi.ini` |
 | AVX2 game code | Faster CPU side (optional, see step 4) | `tools/lain/build_guest.py` |
+| A core of its own for the replay; every draw builds its descriptors | The one-frame skips in Kokiri (landing, walking, the turn by Saria) gone in the lab: frames over 20 ms 4-40 a run before, 0-1 after | `replay_pin` in `runtime/vk_sync.c`, `plat_reserve_core` in `runtime/platform/win32.c`, `BIND_SKIP` default in `runtime/cfg.c` |
 | New name and icon | Window title, settings menu, icon | `runtime/gfx_window_win.c`, `runtime/ui/menu.cpp`, `runtime/ocarina-of-lain.ico` |
 
 The box's cause: the ground fog shader projects a point to the screen and reads depth there. Near the left, right and top edges that point is off screen, which Vulkan leaves undefined, and on an RX 9070 those pixels took a different lighting path. The full investigation is in [docs/lain-findings.md](docs/lain-findings.md).
@@ -46,7 +47,8 @@ The flash meter found no spikes over 4,200 frames of the Deku Tree cutscene on t
 - A test run dropped to about 0.1 GB of free system commit. Machines with less memory or page file may have trouble.
 - Upstream's limits on released textures (`NX2NAVI_TEX_RELEASED_MB`, `NX2NAVI_TEX_COMMIT_FREE_MB`) are off by default here. With frame generation on, they left characters and textures smeared on our test PC. Upstream added them because memory kept growing in long sessions at 2160p, so watch memory on long sessions.
 - Falling leaves, fairies and possibly Link still show ghosting with frame generation. These effects have no motion data of their own.
-- Occasional slight pops in the world at ground level in Kokiri, seen when walking or turning the camera, much rarer with translator patch 0036. Some grass also pops slightly.
+- The Kokiri one-frame skips (landing, walking, the turn by Saria) were frames with about 50% more draws taking 20-42 ms, the replay recording them on a core it shared with 118 other threads. Fixed in the lab (5 + 3 runs of the route, 1 frame over 20 ms in all, worst 23 ms); waiting for the owner's eye. Some grass on the tree house may still pop slightly.
+- The descriptor build skip (`NX2NAVI_BIND_SKIP=1`) leaves a vertex uniform binding unpushed in some draws, which the Vulkan validation layer reports. It is off by default; its cause is not found yet.
 - Not checked: a 10-minute run.
 - Only tested on the PC above. Other cards may behave differently.
 
@@ -70,7 +72,9 @@ Set as environment variables. These internal names still use the original projec
 
 - `NX2NAVI_FETCH_CLAMP=0` turns the box fix off.
 - `NX2NAVI_FLOAT_BITS` is a mask: 1 mesh and task (default), 2 vertex, 4 fragment, 8 compute. All stages at once gave a burst of noise in an older test.
-- `NX2NAVI_MESH_INVARIANT=1` marks mesh positions invariant. Off by default, not tested yet.
+- `NX2NAVI_MESH_INVARIANT=1` marks mesh positions invariant. Off by default, did not help the Kokiri pops.
+- `NX2NAVI_REPLAY_PIN=off` gives the replaying thread no core of its own; a number picks the physical core (default: the last).
+- `NX2NAVI_BIND_SKIP=1` turns the descriptor build skip back on (see Known problems).
 
 ## Test tools
 

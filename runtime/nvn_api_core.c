@@ -676,13 +676,49 @@ NVN_API(nvnQueueSubmitCommands) {
 // f_70004095a0, which tries the read lock at lr 0x70004099a0, flips the halves when [obj+0x528] != [obj+0x529], and when
 // they are equal releases the lock at lr 0x7000409f78 and goes on to rewrite the back half (from lr 0x7000409fd0). Before
 // this the guard listened for 1.2.1's address only and never fired on 1.1.1 (0 of 565,248 releases in a Kokiri run).
+//
+// NX2NAVI_LOD_GUARD=2 (1.1.x): the wait narrowed to what can still read the back half. Until the producer's last flip
+// ([obj+0x528] = [obj+0x529], just before its UnlockMutex returning to lr 0x7000409a10) the back half was the front
+// half, so the submissions entered before that flip may read it; those entered after it read the new front half. The
+// flip observer records lod_entered then, and the guarded release waits only for that submission's fence, which has
+// usually completed already. =1 waits for every submission entered so far (18.1 vs 14.3 ms a frame in Kokiri).
+// In the lab the guard was what kept white flashes away once NX2NAVI_SUBMIT_FINISH=0 (sf1lg: 2 flash runs, sf1: 409).
+// Mode 2 does NOT: lab lg2f 402 flash runs (only 63 flips in a route: the race is not the half swap). Kept for the
+// record; mode 1 with submit_finish off costs 18 ms frames (lg1s), so the shipped build keeps the guard off.
+static int lod_mode(void) {
+    static int m = -1;
+    if (m < 0) {
+        const char *e = cfg_get("NX2NAVI_LOD_GUARD");
+        m = e && *e ? atoi(e) : 0;
+        if (m < 0 || m > 2) m = 1;
+    }
+    return m;
+}
+#define LOD_FLIPS 16
+static struct { uint64_t obj, e; } lod_flips[LOD_FLIPS];
+static PlatMutex lod_flip_lock = PLAT_MUTEX_INIT;
+static volatile int64_t n_flips, n_narrow, n_blocked, wait_ns;
+
+static void obs_unlock_mutex(Cpu *c) {
+    uint64_t lr = c->x[30], obj = c->x[19];
+    rt_original(c);
+    if (lr != 0x7000409a10ull || rt_game_version >= 120 || lod_mode() != 2) return;
+    uint64_t e = __atomic_load_n(&lod_entered, __ATOMIC_SEQ_CST);
+    plat_mutex_lock(&lod_flip_lock);
+    int k = 0, free_k = -1;
+    for (; k < LOD_FLIPS && lod_flips[k].obj != obj; k++)
+        if (!lod_flips[k].obj && free_k < 0) free_k = k;
+    if (k == LOD_FLIPS) k = free_k >= 0 ? free_k : (int)(obj >> 4) % LOD_FLIPS;
+    lod_flips[k].obj = obj, lod_flips[k].e = e;
+    plat_mutex_unlock(&lod_flip_lock);
+    plat_inc64(&n_flips);
+}
+HOST_OBSERVER("_ZN2nn2os11UnlockMutexEPNS0_9MutexTypeE", obs_unlock_mutex);
+
 static void obs_release_read(Cpu *c) {
     uint64_t lr = c->x[30], lock = c->x[0], obj = lock >= 0x538 ? lock - 0x538 : 0;
     rt_original(c);
-    static int on = -1;
-    if (on < 0) {
-        on = cfg_bool("NX2NAVI_LOD_GUARD");
-    }
+    int on = lod_mode();
     // NX2NAVI_LOD_GUARD: counts every 4096 releases, and the return addresses of releases whose object has the producer's
     // shape ([obj+0x528] == [obj+0x529]), so a log shows whether the guard's addresses are the ones the game uses
     static volatile int64_t n_rel, n_lr, n_shape, n_wait;
@@ -702,18 +738,37 @@ static void obs_release_read(Cpu *c) {
         }
     }
     if (on && (r & 4095) == 0)
-        rt_log("lod guard: %lld releases, %lld producer-shaped, %lld at a guarded address, %lld waits", (long long)r,
-               (long long)n_shape, (long long)n_lr, (long long)n_wait);
+        rt_log("lod guard: mode %d: %lld releases, %lld producer-shaped, %lld at a guarded address, %lld waits; flips %lld, "
+               "narrowed %lld, blocked %lld, %.1f ms waited", on, (long long)r, (long long)n_shape, (long long)n_lr,
+               (long long)n_wait, (long long)n_flips, (long long)n_narrow, (long long)n_blocked, wait_ns / 1e6);
     const uint64_t want = rt_game_version < 120 ? 0x7000409f78ull : 0x70008c70c8ull;
     if (lr != want) return;
     if (on) plat_inc64(&n_lr);
     if (!on || !shape) return;
     plat_inc64(&n_wait);
     uint64_t e = __atomic_load_n(&lod_entered, __ATOMIC_SEQ_CST);
+    if (on == 2) {   // only what was entered before the last flip of this object can read its back half
+        plat_mutex_lock(&lod_flip_lock);
+        for (int k = 0; k < LOD_FLIPS; k++)
+            if (lod_flips[k].obj == obj) {
+                e = lod_flips[k].e;
+                plat_inc64(&n_narrow);
+                break;
+            }
+        plat_mutex_unlock(&lod_flip_lock);
+    }
     if (!e) return;
-    NVN_BLOCKING();
-    for (int i = 0; i < 200 && __atomic_load_n(&lod_issued, __ATOMIC_SEQ_CST) < e; i++) plat_sleep_ms(1);
-    uint64_t f = __atomic_load_n(&lod_fence[e % LOD_RING], __ATOMIC_RELAXED);
-    if (gfx_backend()->fence_done() < f) gfx_backend()->fence_wait(f, 200000000ull);
+    if (__atomic_load_n(&lod_issued, __ATOMIC_SEQ_CST) >= e &&
+        gfx_backend()->fence_done() >= __atomic_load_n(&lod_fence[e % LOD_RING], __ATOMIC_RELAXED))
+        return;   // done already: no wait, the core is kept
+    uint64_t t0 = plat_now_ns();
+    plat_inc64(&n_blocked);
+    {
+        NVN_BLOCKING();
+        for (int i = 0; i < 200 && __atomic_load_n(&lod_issued, __ATOMIC_SEQ_CST) < e; i++) plat_sleep_ms(1);
+        uint64_t f = __atomic_load_n(&lod_fence[e % LOD_RING], __ATOMIC_RELAXED);
+        if (gfx_backend()->fence_done() < f) gfx_backend()->fence_wait(f, 200000000ull);
+    }
+    __atomic_add_fetch(&wait_ns, (int64_t)(plat_now_ns() - t0), __ATOMIC_RELAXED);
 }
 HOST_OBSERVER("_ZN2nn2os15ReleaseReadLockEPNS0_20ReaderWriterLockTypeE", obs_release_read);

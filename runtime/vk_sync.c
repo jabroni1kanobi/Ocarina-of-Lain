@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cfg.h"
 #include "gfx.h"
 #include "host.h"
 #include "nvn_api.h"
@@ -421,8 +422,32 @@ uint64_t vk_sync_reserve(void) {
     return v;
 }
 
+// NX2NAVI_REPLAY_PIN=<core> | last (the default) | off: the thread that replays submissions
+// (the game's render thread, or the replay thread with NX2NAVI_REPLAY_ASYNC) gets that core to itself, every other
+// thread the rest (Hookshot PR #1034: Kokiri panning frames over 50 ms 51/61 -> 24/29). Applied at the 1000th
+// submission, after perf.c has set the process mask (which would reset thread masks).
+static void replay_pin(void) {
+    static int state;   // 0 not decided, 1 waiting, -1 off/done
+    static unsigned subs;
+    if (state < 0) return;
+    const char *e = cfg_get("NX2NAVI_REPLAY_PIN");
+    if (!e || !*e) e = "last";   // on by default: lab pin1/pin2/c1s, frames over 20 ms 4-40 -> 0-10 per Kokiri run
+    if (!state) {
+        state = strcmp(e, "off") ? 1 : -1;
+        if (state < 0) return;
+    }
+    if (++subs < 1000) return;
+    state = -1;
+    int core = strcmp(e, "last") ? atoi(e) : -1;
+    uint64_t got;
+    int moved = plat_reserve_core(core, &got);
+    rt_log("vk: replay pin: core %d (mask %#llx) to the replaying thread, %d other threads moved off it%s", core,
+           (unsigned long long)got, moved, moved < 0 ? " (NOT applied)" : "");
+}
+
 uint64_t vk_sync_submit(const uint64_t *handles, int n) {
     vk_sync_start();
+    replay_pin();
     VkCtx *c = vk_ctx();
     plat_mutex_lock(&sub_lock);
     vk_mem_dirty_submit();   // NX2NAVI_TRACE=perf: what a mirror would upload before this submit

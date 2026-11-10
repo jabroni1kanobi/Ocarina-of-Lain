@@ -3,6 +3,7 @@
 #include <io.h>
 #include <stdio.h>
 #include <windows.h>
+#include <tlhelp32.h>
 #include <bcrypt.h>
 #include <pdh.h>
 #include <pdhmsg.h>
@@ -39,6 +40,8 @@ PlatThread *plat_thread_new(PlatThreadFn fn, void *arg, const char *name) {
     return plat_thread_new_ex(fn, arg, name, 0);
 }
 
+static volatile uint64_t g_thread_mask;   // plat_reserve_core: the mask every thread created from then on gets
+
 PlatThread *plat_thread_new_ex(PlatThreadFn fn, void *arg, const char *name, size_t stack) {
     PlatThread *t = calloc(1, sizeof *t);
     if (!t) return NULL;
@@ -51,6 +54,8 @@ PlatThread *plat_thread_new_ex(PlatThreadFn fn, void *arg, const char *name, siz
         wchar_t w[64];
         if (MultiByteToWideChar(CP_UTF8, 0, name, -1, w, 64)) SetThreadDescription(t->h, w);
     }
+    uint64_t m = g_thread_mask;
+    if (m) SetThreadAffinityMask(t->h, (DWORD_PTR)m);
     ResumeThread(t->h);
     return t;
 }
@@ -73,6 +78,51 @@ int plat_thread_join_ns(PlatThread *t, uint64_t ns) {
 void plat_thread_detach(PlatThread *t) {
     CloseHandle(t->h);
     t->h = NULL;
+}
+
+// Gives the calling thread physical core `core` (-1: the last) to itself: the calling thread gets that core's logical
+// processors, every other thread of the process (Toolhelp's snapshot: game, runtime and driver threads) and every
+// thread plat_thread_new creates later get the rest. Returns the threads moved, -1 if not possible; *got: the core's mask.
+int plat_reserve_core(int core, uint64_t *got) {
+    DWORD_PTR proc, sys;
+    *got = 0;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys)) return -1;
+    DWORD len = 0;
+    GetLogicalProcessorInformationEx(RelationProcessorCore, NULL, &len);
+    SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *buf = len ? malloc(len) : NULL;
+    uint64_t masks[64];
+    int n = 0;
+    if (buf && GetLogicalProcessorInformationEx(RelationProcessorCore, buf, &len))
+        for (DWORD off = 0; off < len && n < 64;) {
+            SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *e = (void *)((char *)buf + off);
+            KAFFINITY m = e->Processor.GroupMask[0].Mask & proc;
+            if (e->Processor.GroupMask[0].Group == 0 && m) masks[n++] = m;
+            off += e->Size;
+        }
+    free(buf);
+    if (n < 2) return -1;
+    if (core < 0 || core >= n) core = n - 1;
+    uint64_t mine = masks[core], others = proc & ~mine;
+    if (!others) return -1;
+    g_thread_mask = others;
+    int moved = 0;
+    DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap != INVALID_HANDLE_VALUE) {
+        THREADENTRY32 te = {.dwSize = sizeof te};
+        for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+            if (te.th32OwnerProcessID != pid || te.th32ThreadID == self) continue;
+            HANDLE h = OpenThread(THREAD_SET_INFORMATION | THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID);
+            if (h) {
+                if (SetThreadAffinityMask(h, (DWORD_PTR)others)) moved++;
+                CloseHandle(h);
+            }
+        }
+        CloseHandle(snap);
+    }
+    SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)mine);
+    *got = mine;
+    return moved;
 }
 
 int plat_cpu_cores(uint64_t *all, uint64_t *first) {
