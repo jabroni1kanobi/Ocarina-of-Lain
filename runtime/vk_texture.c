@@ -411,6 +411,42 @@ static int shadow_scale_of(const nvn_texdesc *d, const TexVkFormat *f, uint32_t 
 }
 
 // defer_init: the caller records the image's first transition (init_image or alias_copy).
+
+// NX2NAVI_TEX_POOL_MIN_GB=<n> (0 off; unset: 4 on a device-local heap of 12 GiB or more, else off): CPU-provided textures sub-allocate from a VMA pool on the device-local
+// memory type whose first n GiB of 256 MiB blocks are made at once and never freed (VmaPoolCreateInfo.minBlockCount),
+// capped at 35 % of the heap. At a scene cut the game frees the old area's textures and makes the new ones in the same
+// frame; in VMA's default pools the emptied blocks were destroyed and new ones allocated inside that frame (lab pfi5:
+// AllocateVulkanMemory, BlockVector::Allocate and DeviceMemoryBlock::Destroy ~118 of the render thread's 734 samples
+// in the intro's 1.4 s cut frame). Texture lock held.
+static VmaPool tex_pool_h;
+static uint32_t tex_pool_type;
+static int tex_pool_state;   // 0 not decided, 1 on, -1 off
+static VmaPool tex_pool_for(const VkCtx *c, uint32_t type_bits) {
+    if (tex_pool_state == 0) {
+        tex_pool_state = -1;
+        const char *e = cfg_get("NX2NAVI_TEX_POOL_MIN_GB");
+        long gb = e && *e ? strtol(e, NULL, 10) : -1;   // -1: by the heap size below
+        VmaAllocationCreateInfo ai = {.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT};
+        uint32_t type;
+        if (gb != 0 && vmaFindMemoryTypeIndex(c->vma, type_bits, &ai, &type) == VK_SUCCESS) {
+            VkDeviceSize heap = c->mem_props.memoryHeaps[c->mem_props.memoryTypes[type].heapIndex].size;
+            // the default: on cards with 12 GiB or more (RX 9070: 16), where 4 GiB of texture blocks leave the VRAM
+            // mirrors their budget (lab intro route: the scene-cut frame 862 -> 805 ms, 3 of 3 pairs)
+            if (gb < 0) gb = heap >= (12ull << 30) ? 4 : 0;
+            size_t blocks = (size_t)gb * 4, cap = (size_t)(heap / 100 * 35 / (256ull << 20));
+            if (blocks > cap) blocks = cap;
+            VmaPoolCreateInfo pi = {.memoryTypeIndex = type, .blockSize = 256ull << 20, .minBlockCount = blocks};
+            if (blocks && vmaCreatePool(c->vma, &pi, &tex_pool_h) == VK_SUCCESS) {
+                tex_pool_type = type, tex_pool_state = 1;
+                rt_log("vk: texture pool: %zu blocks of 256 MiB kept on memory type %u (NX2NAVI_TEX_POOL_MIN_GB)", blocks, type);
+            } else {
+                rt_log("vk: texture pool: not created (%zu blocks asked); textures use VMA's default pools", blocks);
+            }
+        }
+    }
+    return tex_pool_state > 0 && (type_bits >> tex_pool_type & 1) ? tex_pool_h : VK_NULL_HANDLE;
+}
+
 static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
     static volatile int32_t n_unmapped, n_unsupported, n_failed, n_unbound, n_thick;
     VkCtx *c = vk_ctx();
@@ -525,7 +561,8 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
                         (unsigned long long)k->addr, w, h, d->format);
         }
     }
-    // A texture whose content the CPU provides (tex_mirrored), up to SUBALLOC_MAX, takes memory from VMA's device blocks:
+    // A texture whose content the CPU provides (tex_mirrored), up to SUBALLOC_MAX, takes memory from VMA's device blocks
+    // (NX2NAVI_TEX_POOL_MIN_GB: from tex_pool, whose first blocks are never freed; see tex_pool_for):
     // the driver prefers a dedicated allocation for most images, and vmaCreateImage follows that, so a scene load
     // (about 2700 new textures in one frame entering Kokiri Forest) made as many vkAllocateMemory calls, 43% of that
     // 680 ms frame. vmaAllocateMemory with the plain requirements sub-allocates instead, from the blocks the headroom
@@ -539,7 +576,8 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
             VkImageMemoryRequirementsInfo2 ri = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2, .image = img};
             vkGetImageMemoryRequirements2(c->device, &ri, &mr2);
             VkMemoryRequirements mr = mr2.memoryRequirements;
-            VmaAllocationCreateInfo ai = {.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT};
+            VmaAllocationCreateInfo ai = {.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                          .pool = tex_pool_for(c, mr.memoryTypeBits)};
             int ok = !dr.requiresDedicatedAllocation && mr.size <= SUBALLOC_MAX &&
                      vmaAllocateMemory(c->vma, &mr, &ai, &e->alloc, NULL) == VK_SUCCESS;
             if (ok && vmaBindImageMemory(c->vma, e->alloc, img) != VK_SUCCESS) {
@@ -2456,5 +2494,7 @@ void vk_texture_shutdown(void) {
     tslots = NULL, sslots = NULL, ntslots = nsslots = 0, nreleased = 0;
     rel_head = rel_tail = NULL, rel_bytes = 0;
     if (sinfo) memset(sinfo, 0, sizeof *sinfo << 20);   // no slot is registered: tokens 0
+    if (tex_pool_state > 0 && c) vmaDestroyPool(c->vma, tex_pool_h);   // its textures went above
+    tex_pool_h = VK_NULL_HANDLE, tex_pool_state = 0;
     unlock();
 }
