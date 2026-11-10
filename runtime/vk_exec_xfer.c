@@ -205,7 +205,7 @@ static uint32_t oq_nseg, oq_capseg;
 static int oq_lost;                      // replay: the segment missed a draw (ring full)
 static uint64_t oq_count;                // completion thread: samples since the last reset
 
-typedef struct { uint64_t addr, seq; int reset, lost; uint32_t n; uint32_t q[]; } OqSegment;
+typedef struct { uint64_t addr, seq; int reset, lost; uint32_t n, ds_cell; uint32_t q[]; } OqSegment;   // ds_cell: vk_drawset_report
 
 static int oq_ready(void) {
     if (oq_state) return oq_state > 0;
@@ -260,7 +260,10 @@ void vk_exec_oq_draw(VkExec *ex) {
     oq_open = (int)q;
 }
 
-void vk_exec_oq_pass_end(VkExec *ex) { oq_close(ex); }
+void vk_exec_oq_pass_end(VkExec *ex) {
+    oq_close(ex);
+    if (vk_drawset_on) vk_drawset_draw_end(ex);
+}
 
 void vk_exec_xfer_shutdown(void) {
     if (oq_state > 0) vkDestroyQueryPool(vk_ctx()->device, oq_pool, NULL);
@@ -299,7 +302,7 @@ static void oq_cb(void *arg) {
     else {
         oq_count += sum;
         if (s->lost && !oq_count) oq_count = 1;
-        if (s->addr) write_counter(s->addr, oq_count), pending_written(s->addr, s->seq);
+        if (s->addr) write_counter(s->addr, oq_count), pending_written(s->addr, s->seq), vk_drawset_report_value(s->ds_cell, oq_count);
     }
     free(s);
 }
@@ -310,6 +313,7 @@ static void oq_segment(VkExec *ex, uint64_t addr, int reset) {
     OqSegment *s = malloc(sizeof *s + sizeof *s->q * oq_nseg);
     if (!s) rt_fatal("vk: out of memory");
     s->addr = addr, s->seq = report_seq, s->reset = reset, s->lost = oq_lost, s->n = oq_nseg;
+    s->ds_cell = vk_drawset_on && addr && !reset ? vk_drawset_report(ex, addr) : UINT32_MAX;
     memcpy(s->q, oq_seg, sizeof *s->q * oq_nseg);
     oq_nseg = 0, oq_lost = 0;
     vk_completion_add(ex->fence, oq_cb, s);

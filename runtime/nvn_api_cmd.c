@@ -703,6 +703,22 @@ NVN_API(nvnCommandBufferResetCounter) { REC(cmd_of(c), OP_RESET_COUNTER, p_reset
 // void nvnCommandBufferReportCounter(NVNcommandBuffer *cmd, NVNcounterType type, NVNbufferAddress address)
 NVN_API(nvnCommandBufferReportCounter) {
     *REC(cmd_of(c), OP_REPORT_COUNTER, p_report_counter) = (p_report_counter){(uint32_t)arg_x(c, 1), arg_x(c, 2)};
+    // NX2NAVI_LOG_REPORT_LR=1: the game call sites of samples-passed reports (to find the code that reads them back)
+    static int on = -1;
+    if (on < 0) on = rt_knob("LOG_REPORT_LR", "0");
+    if (on && (uint32_t)arg_x(c, 1) == NVN_COUNTER_TYPE_SAMPLES_PASSED) {
+        static uint64_t seen[16];
+        static volatile int32_t n;
+        uint64_t lr = c->x[30];
+        int k = 0;
+        while (k < n && k < 16 && seen[k] != lr) k++;
+        if (k == n && k < 16) {
+            seen[k] = lr, plat_inc32(&n);
+            rt_log("nvn: samples-passed report from lr %#llx (x19 %#llx x20 %#llx x21 %#llx), address %#llx",
+                   (unsigned long long)lr, (unsigned long long)c->x[19], (unsigned long long)c->x[20],
+                   (unsigned long long)c->x[21], (unsigned long long)arg_x(c, 2));
+        }
+    }
 }
 // void nvnCommandBufferCopyBufferToBuffer(NVNcommandBuffer *cmd, NVNbufferAddress src, NVNbufferAddress dst,
 // size_t size, int flags)

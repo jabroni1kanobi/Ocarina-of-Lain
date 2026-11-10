@@ -220,3 +220,18 @@ void vk_contact_flush(VkExec *ex);
 // when counting and none is active), and the open pass about to end (ends the active query).
 void vk_exec_oq_draw(VkExec *ex);
 void vk_exec_oq_pass_end(VkExec *ex);
+
+// vk_drawset.c, NX2NAVI_DRAWSET=<dir>: a per-frame ledger of draws, dispatches, skipped draws and samples-passed reports
+// (nx2navi-tools/drawset.py). vk_drawset_on: the frame being replayed is recorded. Replay thread, except
+// vk_drawset_report_value (completion thread).
+enum { VK_DS_DRAW = 1, VK_DS_DRAW_IDX, VK_DS_DRAW_IDX_IND, VK_DS_MESH, VK_DS_MESH_IND, VK_DS_DISPATCH, VK_DS_DISPATCH_IND,
+       VK_DS_REPORT };
+extern int vk_drawset_on;
+void vk_drawset_frame(uint64_t frame);
+int vk_drawset_draw(VkExec *ex, int kind, int prim, uint32_t count, uint32_t inst, int32_t first, uint32_t binst,
+                    uint64_t ib, uint64_t ind, uint64_t caller, uint32_t slot);   // 1: drop the draw (NX2NAVI_DRAWSET_DROP)
+void vk_drawset_skip(VkExec *ex, int mesh, int why);
+void vk_drawset_draw_end(VkExec *ex);   // after a recorded draw's command, and at pass end
+VkBuffer vk_drawset_arg_slot(VkDeviceSize *off, uint32_t *slot);
+uint32_t vk_drawset_report(VkExec *ex, uint64_t addr);
+void vk_drawset_report_value(uint32_t cell, uint64_t v);

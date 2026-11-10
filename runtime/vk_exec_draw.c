@@ -2893,6 +2893,7 @@ static void draw_stats_tick(void) {
 
 static int draw_skipped(const VkExec *ex, int mesh, int why) {
     DRS.skipped[mesh][why]++;
+    if (vk_drawset_on) vk_drawset_skip((VkExec *)ex, mesh, why);
     if (!(DRS.first[mesh] >> why & 1)) {
         DRS.first[mesh] |= 1u << why;
         rt_log("vk: first %s draw skipped because: %s (program %llu)", mesh ? "mesh" : "vertex", sk_names[why],
@@ -3826,6 +3827,9 @@ static void op_draw_mesh(VkExec *ex, const p_draw_mesh *d) {
     if (!d->count || !on) return;
     c0_binst = 0;
     if (!prepare_draw_ex(ex, NVN_DRAW_PRIMITIVE_TRIANGLES, 0x7fffffff, 0, 1)) return;
+    if (vk_drawset_on && vk_drawset_draw(ex, VK_DS_MESH, NVN_DRAW_PRIMITIVE_TRIANGLES, d->count, 1, (int32_t)d->first, 0, 0,
+                                         0, d->caller, UINT32_MAX))
+        return;
     if (d->first) warn_once(W_MESH, "a mesh draw from workgroup %u: drawn from workgroup 0", d->first);
     vk_exec_frame.draws++;
     static uint32_t n_logged;
@@ -3834,6 +3838,7 @@ static void op_draw_mesh(VkExec *ex, const p_draw_mesh *d) {
         rt_log("vk: mesh draw: %u workgroups, program %llu", d->count, (unsigned long long)ex->prog->serial);
     }
     rec_draw_mesh(fn, ex->cb, d->count, 1, 1);
+    if (vk_drawset_on) vk_drawset_draw_end(ex);
     ex->recorded++;
 }
 
@@ -3900,7 +3905,20 @@ static void op_draw_mesh_ind(VkExec *ex, const p_draw_mesh_ind *d) {
     VK_MEM_USE(ip);
     VkDeviceSize at;
     if (!mesh_ring_entry(ex, &ip, &at)) return warn_once(W_MESH, "the indirect mesh ring could not be created: skipped");
+    uint32_t ds_slot = UINT32_MAX;
+    if (vk_drawset_on) {   // the arguments as the draw reads them, after the ring's barrier, outside the pass
+        VkDeviceSize ds_off;
+        VkBuffer ds_buf = vk_drawset_arg_slot(&ds_off, &ds_slot);
+        if (ds_buf) {
+            VkBufferCopy cp = {ip.offset, ds_off, 8};   // {count, first}
+            vkCmdCopyBuffer(ex->cb, ip.buffer, ds_buf, 1, &cp);
+            ex->recorded++;
+        }
+    }
     if (!prepare_draw_ex(ex, NVN_DRAW_PRIMITIVE_TRIANGLES, 0x7fffffff, 0, 1)) return;
+    if (vk_drawset_on && vk_drawset_draw(ex, VK_DS_MESH_IND, NVN_DRAW_PRIMITIVE_TRIANGLES, 0, 1, 0, 0, 0, d->ind, d->caller,
+                                         ds_slot))
+        return;
     vk_exec_frame.draws++;
     static uint32_t n_logged;
     if (n_logged < 8 && knob_log_mesh()) {
@@ -3909,6 +3927,7 @@ static void op_draw_mesh_ind(VkExec *ex, const p_draw_mesh_ind *d) {
                (unsigned long long)ex->prog->serial);
     }
     rec_draw_mesh_ind(fn, ex->cb, mesh_ring, at, 1, 12);
+    if (vk_drawset_on) vk_drawset_draw_end(ex);
     ex->recorded++;
     vk_mem_count(ip.cls, VK_MUSE_IND, 4);
     VK_MEM_BOUND(ip);
@@ -3925,8 +3944,11 @@ static void bind_index(VkExec *ex, const void *data, uint64_t bytes, VkIndexType
 static void op_draw(VkExec *ex, const p_draw *d) {
     c0_binst = (uint32_t)d->base_instance;
     if (d->count <= 0 || !prepare_draw(ex, d->prim, d->count, 0)) return;
-    vk_exec_frame.draws++;
     uint32_t inst = d->instances > 0 ? (uint32_t)d->instances : 1, first = (uint32_t)d->first, n = (uint32_t)d->count;
+    if (vk_drawset_on && vk_drawset_draw(ex, VK_DS_DRAW, d->prim, n, inst, d->first, (uint32_t)d->base_instance, 0, 0, 0,
+                                         UINT32_MAX))
+        return;
+    vk_exec_frame.draws++;
     if (d->prim == NVN_DRAW_PRIMITIVE_QUADS && n >= 4) {   // quads become two triangles each
         uint32_t q = n / 4;
         uint32_t *ix = malloc(sizeof *ix * 6 * q);
@@ -3949,6 +3971,7 @@ static void op_draw(VkExec *ex, const p_draw *d) {
     } else {
         vkCmdDraw(ex->cb, n, inst, first, (uint32_t)d->base_instance);
     }
+    if (vk_drawset_on) vk_drawset_draw_end(ex);
     ex->recorded++;
 }
 
@@ -3977,6 +4000,10 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
     if (d->itype < 0 || d->itype > 2) return warn_once(W_INDEX, "index type %d is unknown: draw skipped", d->itype);
     int restart = restart_for(ex, d->prim, d->itype);
     if (d->count <= 0 || !prepare_draw(ex, d->prim, d->count, restart)) return;
+    if (vk_drawset_on && vk_drawset_draw(ex, VK_DS_DRAW_IDX, d->prim, (uint32_t)d->count,
+                                         d->instances > 0 ? (uint32_t)d->instances : 1, d->base_vertex,
+                                         (uint32_t)d->base_instance, d->ibuf, 0, 0, UINT32_MAX))
+        return;
     vk_exec_frame.draws++;
     uint64_t bytes = (uint64_t)d->count * isize[d->itype];
     VkMemSpan sp;
@@ -4004,6 +4031,7 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
     }
     vkCmdDrawIndexed(ex->cb, (uint32_t)d->count, d->instances > 0 ? (uint32_t)d->instances : 1, 0, d->base_vertex,
                      (uint32_t)d->base_instance);
+    if (vk_drawset_on) vk_drawset_draw_end(ex);
     ex->recorded++;
     if (d->itype != NVN_INDEX_TYPE_UNSIGNED_BYTE) mvobj_draw(ex, d, sp.buffer, sp.offset);
 }
@@ -4021,11 +4049,13 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
     if (!vk_mem_resolve(d->ibuf, 1, &ib) || ib.offset % (d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? 2 : 4))
         return warn_once(W_INDEX, "index buffer %#llx is not backed or not aligned: indirect draws skipped", (unsigned long long)d->ibuf);
     if (!prepare_draw(ex, d->prim, 0x7fffffff, restart_for(ex, d->prim, d->itype))) return;
+    if (vk_drawset_on && vk_drawset_draw(ex, VK_DS_DRAW_IDX_IND, d->prim, 0, 0, 0, 0, d->ibuf, d->ind, 0, UINT32_MAX)) return;
     vk_exec_frame.draws++;
     VK_MEM_USE(ip);
     VK_MEM_USE(ib);
     vkCmdBindIndexBuffer(ex->cb, ib.buffer, ib.offset, d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexedIndirect(ex->cb, ip.buffer, ip.offset, 1, sizeof(VkDrawIndexedIndirectCommand));
+    if (vk_drawset_on) vk_drawset_draw_end(ex);
     ex->recorded += 2;
     vk_mem_count(ip.cls, VK_MUSE_IND, sizeof(VkDrawIndexedIndirectCommand));
     VK_MEM_BOUND(ip);
@@ -4347,6 +4377,9 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     twin_dispatch = 1;
     bind_resources(ex, info);
     twin_dispatch = 0;
+    if (vk_drawset_on && vk_drawset_draw(ex, VK_DS_DISPATCH, 0, (uint32_t)d->x, (uint32_t)d->y, d->z, 0, 0, 0, d->caller,
+                                         UINT32_MAX))
+        return;
     VkPassMark *m = dispatch_mark(ex, cs, (uint32_t)d->x, (uint32_t)d->y, (uint32_t)d->z);
     vkCmdDispatch(ex->cb, (uint32_t)d->x, (uint32_t)d->y, (uint32_t)d->z);
     vk_pass_mark_end(ex->cb, m);
@@ -4372,6 +4405,17 @@ static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
     if ((info->pool && !pool_on()) || shader_skipped(cs)) return;   // NX2NAVI_POOL=0, NX2NAVI_SKIP_SHADERS
     vk_exec_barrier(ex);
     VK_MEM_USE(ip);
+    uint32_t ds_slot = UINT32_MAX;
+    if (vk_drawset_on) {   // the group counts as the dispatch reads them
+        VkDeviceSize ds_off;
+        VkBuffer ds_buf = vk_drawset_arg_slot(&ds_off, &ds_slot);
+        if (ds_buf) {
+            VkBufferCopy cp = {ip.offset, ds_off, sizeof(VkDispatchIndirectCommand)};
+            vkCmdCopyBuffer(ex->cb, ip.buffer, ds_buf, 1, &cp);
+            ex->recorded++;
+        }
+        vk_drawset_draw(ex, VK_DS_DISPATCH_IND, 0, 0, 0, 0, 0, 0, d->ind, d->caller, ds_slot);
+    }
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_COMPUTE, p);
     c0_dim[0] = c0_dim[1] = c0_dim[2] = 0;
     B.c0_valid[2] = 0;   // a fresh c0 range: the copy below must not change one an earlier dispatch reads
