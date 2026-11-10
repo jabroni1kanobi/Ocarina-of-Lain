@@ -893,6 +893,7 @@ int vk_dlaa_prev_camera(VkDescriptorBufferInfo *out, float jitter[2]) {
 // mask, like the motion draws) before it can be on. In the upscaling modes the light target DLSS reads also holds the
 // bloom by then; the copy would have to be compared at the end of the scene instead.
 #include "dlaa_mask_spv.h"
+#include "dlaa_mask_local_spv.h"   // shaders/dlaa_mask_local.comp: local contrast (NX2NAVI_REACTIVE_LOCAL=1)
 #define MASK_THR 0.1f
 #define MASK_GAIN 2.5f
 #define SNAPS 3
@@ -928,8 +929,13 @@ static int mask_init(void) {
                                            .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
                                            .bindingCount = 3, .pBindings = b};
     VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
-    VkShaderModuleCreateInfo mi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof dlaa_mask_spv,
-                                   .pCode = dlaa_mask_spv};
+    // NX2NAVI_REACTIVE_LOCAL=1: the share of colour the transparents changed above its mean on a 24 px ring, so fog and
+    // haze (smooth over the picture) stay out and particles and fairies (spots) stay in
+    int local = rt_knob("REACTIVE_LOCAL", "0");
+    VkShaderModuleCreateInfo mi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                   .codeSize = local ? sizeof dlaa_mask_local_spv : sizeof dlaa_mask_spv,
+                                   .pCode = local ? dlaa_mask_local_spv : dlaa_mask_spv};
+    if (local) rt_log("dlaa: reactive mask from local contrast (NX2NAVI_REACTIVE_LOCAL)");
     VkShaderModule m = VK_NULL_HANDLE;
     if (vkCreateDescriptorSetLayout(c->device, &dci, NULL, &R.dsl) != VK_SUCCESS) goto fail;
     VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,

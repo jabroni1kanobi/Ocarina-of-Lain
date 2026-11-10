@@ -2973,6 +2973,27 @@ static int draw_skipped(const VkExec *ex, int mesh, int why) {
 
 // mesh: a mesh draw (op_draw_mesh): the program's mesh and task stages stand in for the vertex stage, and nothing
 // vertex-related (vertex buffers, motion vector bookkeeping of vertex shaders) is bound or noted.
+// NX2NAVI_TPROBE=1 (diagnosis, a particle-only reactive mask): for frame 3000, one line per blended draw over the scene
+// depth (D32, scene width) and per depth-writing draw count: vertices, blend factors of target 0, depth test/write,
+// the scissor's share of the pass, the fragment shader; up to 200 lines.
+static void tprobe(VkExec *ex, const VkPipeState *s, int32_t count, const VkRect2D *sc) {
+    static int on = -1, lines;
+    if (on < 0) on = rt_knob("TPROBE", "0");
+    if (!on || lines >= 200) return;
+    uint64_t frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (frame != 3000) return;
+    const VkExecTarget *z = &ex->depth;
+    if (!z->image || z->width < DLAA_SCENE_MIN_W || z->format != VK_FORMAT_D32_SFLOAT) return;
+    int blend = s->color.blend_en & 1;
+    if (!blend) return;
+    double area = ex->pass_w && ex->pass_h ? (double)sc->extent.width * sc->extent.height / ((double)ex->pass_w * ex->pass_h) : 0;
+    lines++;
+    rt_log("tprobe: %d vertices, blend src %u dst %u eq %u (a %u %u), dt %u dw %u, scissor %.2f of %ux%u, c0 fmt %d, fs %p",
+           count, (unsigned)s->blend[0].src_rgb, (unsigned)s->blend[0].dst_rgb, (unsigned)s->blend[0].eq_rgb,
+           (unsigned)s->blend[0].src_a, (unsigned)s->blend[0].dst_a, (unsigned)s->ds.dt, (unsigned)s->ds.dw, area,
+           ex->pass_w, ex->pass_h, s->color_fmt[0], (const void *)s->fs);
+}
+
 static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int mesh) {
     if (ex->render_disabled) return vk_cond_draws_skip += ex->has_render_cond, draw_skipped(ex, mesh, SK_DISABLED);
     cb_res(ex);
@@ -3090,6 +3111,7 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
     if (!p || !info) return draw_skipped(ex, mesh, SK_PIPE_FAILED);
     if (info->pool && !pool_on()) return draw_skipped(ex, mesh, SK_POOL_OFF);
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    tprobe(ex, &s, count, &sc);
     if (!B.st_valid || memcmp(&B.st, &s, sizeof s)) {
         vk_pipeline_set_dynamic(ex->cb, &s);
         ex->recorded++;

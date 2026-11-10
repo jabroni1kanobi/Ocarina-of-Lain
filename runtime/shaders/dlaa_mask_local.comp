@@ -1,0 +1,37 @@
+#version 450
+// The reactive mask with local contrast (vk_dlaa.c mask_pass, NX2NAVI_REACTIVE_LOCAL=1). The plain mask
+// (tools/make_dlaa_mask.py) is the share r of a pixel's colour the transparents changed; in Ocarina that share is large
+// over fog and haze too, which then lose their temporal anti-aliasing (lab rm1: the upscaler's error on still pixels
+// halved, i.e. it copied the raw frame there). Fog changes smoothly over the picture, particles and fairies are small
+// spots: this mask keeps r above the mean of r on a ring of RING samples RADIUS pixels around the pixel, so a smooth
+// layer cancels out and a spot stays. Objects wider than 2 * RADIUS keep only their rim.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D before;   // the light target when the transparents start
+layout(binding = 1) uniform sampler2D after;    // the light target when the upscaler runs
+layout(binding = 2, r8) uniform writeonly image2D mask;
+layout(push_constant) uniform P { vec4 p; };    // render size xy, threshold z, gain w
+
+const int RING = 12;
+const float RADIUS = 24.0;
+
+float share(ivec2 c) {
+    c = clamp(c, ivec2(0), ivec2(p.xy) - 1);
+    vec3 b = texelFetch(before, c, 0).rgb, a = texelFetch(after, c, 0).rgb;
+    vec3 d = abs(a - b);
+    float dm = max(max(d.r, d.g), d.b);
+    float m = max(max(max(a.r, a.g), a.b), max(max(b.r, b.g), b.b));
+    return dm / max(m, 1e-4);
+}
+
+void main() {
+    ivec2 c = ivec2(gl_GlobalInvocationID.xy);
+    if (c.x >= int(p.x) || c.y >= int(p.y)) return;
+    float r = share(c);
+    float ring = 0.0;
+    for (int i = 0; i < RING; i++) {
+        float t = 6.2831853 * float(i) / float(RING);
+        ring += share(c + ivec2(round(RADIUS * vec2(cos(t), sin(t)))));
+    }
+    float local = r - ring / float(RING);
+    imageStore(mask, c, vec4(clamp((local - p.z) * p.w, 0.0, 1.0)));
+}
