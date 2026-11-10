@@ -66,7 +66,7 @@ static volatile uint64_t cur_frame; // last presented frame
 static uint64_t frame_lo, frame_hi; // NX2NAVI_PROFILE_FRAMES=<lo>-<hi>: sample only while presents lo..hi-1 are pending
 static int64_t world_lo, world_hi;  // NX2NAVI_PROFILE_FRAMES=w<lo>-<hi>: only while the world clock is in [lo, hi) s (us)
 
-#define SLOW_RING (1u << 15)        // NX2NAVI_PROFILE_SLOW: about 0.5 s of samples of every thread
+#define SLOW_RING (1u << 17)        // NX2NAVI_PROFILE_SLOW: about 2 s of samples of every thread (a 0.9 s scene-cut frame fits)
 #define SLOW_DUMPS 64
 typedef struct { uint64_t t; DWORD tid; uint32_t depth; uint64_t rip[PROF_DEPTH]; } Sample;
 static Sample ring[SLOW_RING];
