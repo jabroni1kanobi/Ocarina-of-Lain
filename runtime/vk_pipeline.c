@@ -1248,12 +1248,30 @@ static struct {
     uint32_t n, full;
 } VO = {.lock = PLAT_MUTEX_INIT};
 
-// Adds fs's inputs (packed ones excepted) to vs's union; returns the union, types in io (the first type met wins).
+// Packed fragment inputs (Component decorations: several variables in one location) were left out of the vertex
+// outputs, so the vertex stage declared nothing at their locations and they read undefined values (the validation
+// layer on the RX 9070: fragment inputs at locations 6-15 with no output in the vertex stage, 9 pipelines of the Kokiri
+// route). NX2NAVI_PACKED_OUTS=1 declares such a location as a whole output of its type, which covers every component a
+// packed input reads. Off by default: it did not clear the layer's reports (lab va10: still 9), whose vertex stages
+// declare other components of the same location ("Location 9 Component 0"), so the fix needs component masks.
+static int packed_outs_on(void) {
+    static int on = -1;
+    if (on < 0) on = rt_knob("PACKED_OUTS", "0");
+    return on;
+}
+
+// A packed input as the output that covers it: its type, all four components.
+static GfxShaderIo unpacked(GfxShaderIo io) { return (GfxShaderIo){io.type, 4, 0}; }
+
+// Adds fs's inputs to vs's union; returns the union, types in io (the first type met wins).
 static uint32_t vs_outs(const GfxShader *vs, const GfxShader *fs, GfxShaderIo io[32]) {
     GfxShaderIo fin[32];
     uint32_t need = fs ? gfx_shader_inputs(fs, fin) : 0, mask;
     for (int i = 0; i < 32; i++)
-        if (need >> i & 1 && fin[i].packed) need &= ~(1u << i);
+        if (need >> i & 1 && fin[i].packed) {
+            if (packed_outs_on()) fin[i] = unpacked(fin[i]);
+            else need &= ~(1u << i);
+        }
     plat_mutex_lock(&VO.lock);
     uint32_t j = (uint32_t)(((uintptr_t)vs >> 4) * 0x9e3779b1u) & (VS_OUTS_CAP - 1);
     while (VO.vs[j] && VO.vs[j] != vs) j = (j + 1) & (VS_OUTS_CAP - 1);
@@ -1439,6 +1457,8 @@ static uint32_t vs_union_missing(const VkPipeState *s, GfxShaderIo fin[32]) {
         GfxShaderIo fi[32];
         uint32_t fneed = gfx_shader_inputs(s->fs, fi);
         for (int i = 0; i < 32; i++)
+            if (fneed >> i & 1 && fi[i].packed && packed_outs_on()) fi[i] = unpacked(fi[i]);
+        for (int i = 0; i < 32; i++)
             if (fneed >> i & 1 && !fi[i].packed &&
                 (!(need >> i & 1) || fin[i].type != fi[i].type || fin[i].comps < fi[i].comps)) {
                 if (need >> i & 1 && fin[i].type != fi[i].type)
@@ -1483,6 +1503,7 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
         GfxShaderIo fin[32], vout[32];
         uint32_t need = gfx_shader_inputs(s->fs, fin), have = mesh ? ~0u : gfx_shader_outputs(s->vs, vout), missing = 0;
         for (int i = 0; i < 32; i++) {
+            if (need >> i & 1 && fin[i].packed && packed_outs_on()) fin[i] = unpacked(fin[i]);
             if (!(need >> i & 1) || fin[i].packed) continue;
             if (!(have >> i & 1)) missing |= 1u << i;
             else if (!mesh && vout[i].type != fin[i].type)
