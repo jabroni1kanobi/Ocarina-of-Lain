@@ -307,6 +307,10 @@ int vk_mem_vram(uint64_t *used, uint64_t *budget, int *exact);
 const VmaDeviceMemoryCallbacks *vk_headroom_callbacks(void);
 void vk_headroom_start(void);
 void vk_headroom_stop(void);   // before vmaDestroyAllocator
+// NX2NAVI_RT_POOLS: memory for a render-target image from the one-block pools the headroom thread makes ahead; 0 when
+// they are off, the image does not fit one, or none has room (the caller then allocates as before).
+int vk_rt_pool_alloc(const VkMemoryRequirements *mr, VmaAllocation *out);
+int vk_rt_pools_on(void);
 int vk_mem_resolve(uint64_t addr, uint64_t size, VkMemSpan *out);   // 1 when all of [addr, addr+size) is backed
 // Changes whenever vk_mem_resolve plus VK_MEM_USE may give another span for an address: a pool added, finalized or
 // mapped, a mirror created, refused or forgotten, a submission started.
@@ -405,6 +409,8 @@ const VkTexImage *vk_texture_by_id(int id, view_t *view, int *has_view);
 void vk_texture_lock(void);
 void vk_texture_unlock(void);
 const VkTexImage *vk_texture_by_id_locked(int id, view_t *view, int *has_view);
+int vk_texture_sample_locked(int id, int in_pass, uint64_t who);   // a draw (in_pass) or dispatch samples slot id: use stamps, history carry; 0: no texture
+extern int vk_history_carry;   // NX2NAVI_HISTORY_CARRY, read once at the first texture lock (vk_texture.c tex_init)
 VkSampler vk_sampler_by_id_locked(int id);
 // The slot's sampler with nearest filtering and no anisotropy: a depth texture read without a compare lands on one texel
 // on the Switch although the game binds a linear sampler. VK_NULL_HANDLE
@@ -453,6 +459,7 @@ size_t vk_texture_texel_span(const tex_t *t, const view_t *v, const NVNcopyRegio
 int vk_texture_small_dirty(void);                   // a small mirrored target holds GPU texels its storage lacks
 void vk_texture_write_back_small(uint64_t fence);   // writes those rendered by work up to fence back to storage
 void vk_texture_debug(const VkTexImage *img, uint32_t *uploads, int *last_change, int *pages_written);   // vk_dump
+void vk_texture_life(const VkTexImage *img, uint64_t out[5]);   // vk_dump: frames (frame_now) of born, revived, revivals, released, written
 int vk_texture_slot_swz(int id, uint8_t swz[4]);    // vk_dump: swizzle of the descriptor in slot id
 int vk_texture_read_image(const tex_t *t, const view_t *v, const NVNcopyRegion *r, uint8_t *dst, uint64_t row,
                           uint64_t img);            // always from the image (GPU copy, waited for); 0 on failure

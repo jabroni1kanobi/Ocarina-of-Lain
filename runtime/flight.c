@@ -16,6 +16,7 @@
 #include "gfx.h"
 #include "host.h"
 #include "input.h"
+#include "prof.h"
 #include "vk.h"
 #include "vk_exec.h"
 #include "platform/platform.h"
@@ -33,9 +34,56 @@ static const char *const count_names[C_N] = {
     "pipe_built", "tex_new", "tex_alias", "wb_done", "wb_skip"};
 _Static_assert(PERF_CNT_N == 12, "count_names follows the PERF_CNT_* list");
 
+static const char *const x_names[FX_N] = {"replay_ms", "gpuwait_r_ms", "gpuwait_o_ms", "rsvc_ms", "msvc_ms", "submit_ms",
+                                          "bind_ms", "pool_ms", "rt_ms", "teximg_ms", "replay_mcyc", "cpu", "cpu_moves",
+                                          "pool_refills", "pool_full", "pool_lock_ms", "texlock_ms", "rthr_mcyc",
+                                          "busy_even_mcyc", "busy_odd_mcyc", "elapsed_mcyc", "guard_mcyc",
+                                          "rec_main_ms", "rec_other_ms", "sublock_ms", "pins_ms", "usnap_ms", "mirror_ms",
+                                          "freeze_ms", "xfer_ms", "thaw_ms", "n_freeze", "n_thaw", "gen_slots", "gen_samp",
+                                          "gen_entry", "probe_cpu", "probe_thr", "probe_mem", "page_faults", "dev_allocs",
+                                          "rtpool"};
+_Static_assert(FX_RTPOOL == FX_N - 1, "x_names follows the FX_* list");
+volatile uint64_t flight_x_frame;
+FlightXRec flight_x_rec;
+
+// NX2NAVI_FLIGHT_X speed probes: three fixed pieces of work timed in TSC cycles, once per frame at the render thread's
+// first recording. A frame whose recording takes longer with the same draws either does more work (the probes stay
+// put) or runs the same work slower: then probe_cpu (one dependent multiply chain: only the core's clock moves it),
+// probe_thr (twelve independent chains: a thread on the core's other logical processor moves it too) and probe_mem (a
+// pointer walk, one line in each of 2048 pages of a private buffer: emptied caches and TLB move it) say which.
+#define PROBE_PAGES 2048
+static uint32_t *probe_buf;   // [page * 1024 + 16 * (page % 61)]: the next page of the walk
+void flight_x_probe(void) {
+    static uint64_t last = ~0ull;
+    if (last == flight_x_frame) return;
+    last = flight_x_frame;
+    if (!probe_buf) {
+        if (!(probe_buf = calloc((size_t)PROBE_PAGES * 1024, sizeof *probe_buf))) return;
+        // p -> (5 p + 1237) mod 2048 visits every page once (a full-period generator for a power of two)
+        for (uint32_t p = 0; p < PROBE_PAGES; p++) probe_buf[(size_t)p * 1024 + 16 * (p % 61)] = (p * 5 + 1237) % PROBE_PAGES;
+    }
+    static volatile uint64_t sink;
+    uint64_t x = 0x9E3779B97F4A7C15ull + sink, t0 = __builtin_ia32_rdtsc();
+    for (int i = 0; i < 4000; i++) x = x * 0x2545F4914F6CDD1Dull + 1;
+    uint64_t t1 = __builtin_ia32_rdtsc();
+    uint64_t s[12];
+    for (int k = 0; k < 12; k++) s[k] = x + (uint64_t)k * 0xBF58476D1CE4E5B9ull;
+    for (int i = 0; i < 2000; i++)
+        for (int k = 0; k < 12; k++) s[k] = (s[k] ^ (s[k] >> 29)) * 0x94D049BB133111EBull;
+    uint64_t t2 = __builtin_ia32_rdtsc();
+    uint32_t p = 0;
+    for (int i = 0; i < 512; i++) p = probe_buf[(size_t)p * 1024 + 16 * (p % 61)];
+    uint64_t t3 = __builtin_ia32_rdtsc();
+    for (int k = 0; k < 12; k++) x ^= s[k];
+    sink = (x ^ p) & 1;
+    plat_xchg64(&flight_x_ns[FX_PROBE_CPU], (int64_t)(t1 - t0) * 1000);
+    plat_xchg64(&flight_x_ns[FX_PROBE_THR], (int64_t)(t2 - t1) * 1000);
+    plat_xchg64(&flight_x_ns[FX_PROBE_MEM], (int64_t)(t3 - t2) * 1000);
+}
+
 typedef struct {
     uint64_t frame, t_ns, tick;   // tick: frame_step_ticks (input script game time)
-    uint32_t interval_us, blocked_us[PERF_N], n[C_N];
+    uint32_t interval_us, blocked_us[PERF_N], n[C_N], x_us[FX_N];
 } Rec;
 
 typedef struct {
@@ -46,8 +94,15 @@ typedef struct {
     Rec r[];
 } DumpJob;
 
-int flight_on;
+int flight_on, flight_x_on;
+volatile int64_t flight_x_ns[FX_N];
 static int ring_n, thumbs_on;
+
+void flight_x_svc(uint64_t t0, uint64_t t1) {
+    uint32_t tid = plat_thread_id();
+    if (tid == prof_render_tid) plat_add64(&flight_x_ns[FX_RSVC], (int64_t)(t1 - t0));
+    else if (tid == prof_main_tid) plat_add64(&flight_x_ns[FX_MSVC], (int64_t)(t1 - t0));
+}
 static Rec *ring;
 static uint64_t recorded;          // records written so far
 static uint64_t spike_ns, t0_ns;
@@ -91,6 +146,8 @@ void flight_init(void) {
     thumbs_on = env_u("NX2NAVI_FLIGHT_THUMBS", 1) != 0;
     if (thumbs_on) vk_thumbs_enable(ring_n);
     flight_on = 1;
+    flight_x_on = env_u("NX2NAVI_FLIGHT_X", 0) != 0;
+    if (flight_x_on) rt_log("flight: per-frame replay, GPU waits and guest SVC waits of the render and main threads recorded (NX2NAVI_FLIGHT_X)");
     rt_log("flight: on: last %d frames, %s; dump on F8, on a frame over %llu ms (one per 10 s)%s, to %s", ring_n,
            thumbs_on ? "thumbnails 320x180" : "no thumbnails", (unsigned long long)(spike_ns / 1000000),
            spike_ns ? "" : " (spike trigger off)", base_dir);
@@ -273,6 +330,7 @@ static void dump_main(void *arg) {
     fprintf(f, "frame\ttick\tt_ms\tinterval_ms");
     for (int k = 0; k < PERF_N; k++) fprintf(f, "\t%s", blocked_names[k]);
     for (int k = 0; k < C_N; k++) fprintf(f, "\t%s", count_names[k]);
+    for (int k = 0; k < FX_N && flight_x_on; k++) fprintf(f, "\t%s", x_names[k]);
     fprintf(f, "\tthumb\n");
     for (int i = 0; i < j->n; i++) {
         const Rec *r = &j->r[i];
@@ -280,6 +338,7 @@ static void dump_main(void *arg) {
                 r->interval_us / 1000.0);
         for (int k = 0; k < PERF_N; k++) fprintf(f, "\t%.2f", r->blocked_us[k] / 1000.0);
         for (int k = 0; k < C_N; k++) fprintf(f, "\t%u", r->n[k]);
+        for (int k = 0; k < FX_N && flight_x_on; k++) fprintf(f, "\t%.2f", r->x_us[k] / 1000.0);
         fprintf(f, "\t%d\n", have ? have[i] : 0);
     }
     fclose(f);
@@ -328,6 +387,35 @@ void flight_frame(uint64_t frame, uint64_t now_ns, uint64_t interval_ns, const u
     r->tick = frame_step_ticks();
     r->interval_us = (uint32_t)(interval_ns / 1000);
     for (int k = 0; k < PERF_N; k++) r->blocked_us[k] = (uint32_t)(blocked_ns[k] / 1000);
+    for (int k = 0; k < FX_N; k++) r->x_us[k] = flight_x_on ? (uint32_t)(plat_xchg64(&flight_x_ns[k], 0) / 1000) : 0;
+    flight_x_frame = frame;
+    if (flight_x_on) {   // this thread's CPU and its core's two logical processors over the frame, in cycles
+        static uint64_t p_thr, p_idle[2], p_tsc, p_guard;
+        int cpu = plat_cpu_number() & ~1;
+        uint64_t thr = plat_thread_cycles(), idle[2] = {plat_idle_cycles(cpu), plat_idle_cycles(cpu + 1)}, tsc = __builtin_ia32_rdtsc();
+        uint64_t el = tsc - p_tsc, guard = plat_core_guard_cycles();
+        r->x_us[FX_GUARD_CYC] = p_tsc ? (uint32_t)((guard - p_guard) / 1000) : 0;
+        p_guard = guard;
+        if (p_tsc) {
+            r->x_us[FX_RTHR_CYC] = (uint32_t)((thr - p_thr) / 1000);
+            r->x_us[FX_ELAPSED_CYC] = (uint32_t)(el / 1000);
+            for (int k = 0; k < 2; k++) {
+                uint64_t di = idle[k] - p_idle[k];
+                r->x_us[FX_BUSY_EVEN + k] = (uint32_t)((el > di ? el - di : 0) / 1000);
+            }
+        }
+        p_thr = thr, p_idle[0] = idle[0], p_idle[1] = idle[1], p_tsc = tsc;
+        // how far the generations that flush the per-draw memos moved, and the process's page faults
+        static uint32_t p_gen[3], p_pf;
+        uint32_t g[3] = {vk_texture_slots_gen(), vk_sampler_gen(), vk_texture_entry_gen()}, pf = (uint32_t)plat_page_faults();
+        for (int k = 0; k < 3; k++) {
+            uint32_t d = g[k] - p_gen[k];
+            r->x_us[FX_GEN_SLOTS + k] = recorded && d < 4000000u ? d * 1000u : 0;
+            p_gen[k] = g[k];
+        }
+        r->x_us[FX_PAGE_FAULTS] = recorded && pf - p_pf < 4000000u ? (pf - p_pf) * 1000u : 0;
+        p_pf = pf;
+    }
     // vk_exec_frame grows until vk_exec_frame_log resets it, which NX2NAVI_TRACE=gfx does right after this call
     const VkExecFrame *x = &vk_exec_frame;
     int reset = (rt_trace & RT_TRACE_GFX) != 0;

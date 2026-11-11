@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "flight.h"
 #include "gfx.h"
 #include "host.h"
 #include "nvn_api.h"
@@ -1899,12 +1900,23 @@ void nvn_pool_flushed(const pool_t *p, uint64_t off, uint64_t size) {
 // gen_lock exclusive: freezes up to FREEZE_PER_SUB candidate regions still idle. The query after the
 // protection collects the writes made before it took effect.
 static void freeze_pass(void) {
+    uint64_t fx0 = nfcand ? FX_T0() : 0;   // NX2NAVI_FLIGHT_X: what a pass costs and how many regions it froze
+    int tried = 0, frozen = 0;
     for (int done = 0; nfcand && done < FREEZE_PER_SUB;) {
         uint64_t j = fcand[--nfcand], a = j << REG_SHIFT;
         if (ww_ep - reg_last[j] < (uint32_t)freeze_idle || mem_frozen(a)) continue;
-        done++;
+        done++, tried++;
         if (!mem_freeze(a)) { n_frz_refused++; continue; }
+        frozen++;
         query_stamp(a, a + (1ull << REG_SHIFT), ++gen_now);
+    }
+    if (fx0) {
+        uint64_t d = kern_now_ns() - fx0;
+        plat_add64(&flight_x_ns[FX_FREEZE], (int64_t)d);
+        FX_COUNT(FX_NFREEZE, frozen);
+        if (d >= 500000 && flight_x_frame > 3000)
+            rt_log("fx: frame %llu: freeze pass %.2f ms: %d regions tried, %d frozen, %d candidates left",
+                   (unsigned long long)flight_x_frame + 1, d / 1e6, tried, frozen, nfcand);
     }
 }
 

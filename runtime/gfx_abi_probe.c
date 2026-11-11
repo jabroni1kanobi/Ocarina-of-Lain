@@ -94,10 +94,56 @@ static void check_write_watch(void) {
     CHECK(plat_mem_state(a, a + 0x10000, &end) == PLAT_PROT_RW && end == a + 0x4000, "the thawed pages are not read-write");
     CHECK(plat_mem_state(a + 0x4000, a + 0x4001, &end) == PLAT_MEM_RESERVED, "a hole got committed");
     printf("write-watch: region with reserved holes frozen and thawed by a write\n");
+    // A mapping change thaws first: unmapping a frozen region leaves it thawed and reserved, with nothing to freeze.
+    CHECK(mem_freeze(ra) == 1, "refreeze of the region with holes");
     CHECK(mem_unmap_physical(a, 0x4000) == 0, "UnmapPhysicalMemory");
+    CHECK(!mem_frozen(ra) && plat_mem_state(a, a + 0x4000, &end) == PLAT_MEM_RESERVED && end == a + 0x4000,
+          "unmapping a frozen region did not thaw and release it");
+    CHECK(mem_freeze(ra) == 0, "a region without a committed page froze");
     CHECK(mem_written_pages(RT_KERNEL_BASE, 0x1000, pages, 8) == UINT64_MAX, "kernel region is not write-watched");
-    CHECK(mem_set_heap_size(0, &heap) == 0, "SetHeapSize 0");
     printf("write-watch: alias page written once: reported once, then not\n");
+
+    // A moved stack (MapMemory): its source has no access while moved, so the source's region does not freeze; the
+    // destination freezes like any committed memory, and the move back thaws it before it is released.
+    CHECK(mem_set_heap_size(0x400000, &heap) == 0, "SetHeapSize 4 MiB");
+    uint64_t h2 = heap + 0x200000, src = h2 + 0x3000, dst = g->stack.base + 0x10000, rd = dst & ~0x1fffffull;
+    CHECK(mem_map(dst, src, 0x2000) == 0, "MapMemory of two heap pages into the stack region");
+    CHECK(mem_freeze(h2) == 0 && !mem_frozen(h2), "a region with a no-access page froze");
+    CHECK(mem_freeze(rd) == 1, "freeze of a moved stack's region");
+    *(volatile uint8_t *)(uintptr_t)(dst + 0x1000) = 5;
+    CHECK(!mem_frozen(rd) && mem_freeze(rd) == 1, "a write did not thaw the moved stack, or it did not freeze again");
+    CHECK(mem_unmap(dst, src, 0x2000) == 0, "UnmapMemory");
+    CHECK(!mem_frozen(rd) && *(volatile uint8_t *)(uintptr_t)(src + 0x1000) == 5, "the move back lost the stack's bytes");
+    CHECK(plat_mem_state(dst, dst + 1, &end) == PLAT_MEM_RESERVED, "the moved stack's pages stayed committed");
+    CHECK(mem_freeze(h2) == 1 && mem_freeze(rd) == 0, "after the move back: the source's region must freeze, the empty one not");
+    printf("write-watch: moved stack: source region refused while moved, destination frozen and thawed\n");
+
+    // A freeze costs the same whatever lies behind the region. The system's own query sizes the whole run of
+    // same-state pages from the address on: 8-9 ms with 1 GiB of written memory behind the region, the long frame each
+    // time a streamed texture's region froze again. NX2NAVI_FREEZE_CHECK=1 asks the system as well and shows that cost.
+    const uint64_t big = 0x40000000ull;
+    CHECK(mem_set_heap_size(0x400000 + big, &heap) == 0, "SetHeapSize 1 GiB + 4 MiB");
+    for (uint64_t o = 0x200000; o < 0x400000 + big; o += 0x1000) p[o] = 1;   // h2 thaws; every page behind it is written
+    CHECK(!mem_frozen(h2), "a write did not thaw the region");
+    uint64_t best = UINT64_MAX;
+    for (int k = 0; k < 5; k++) {
+        uint64_t t0 = plat_now_ns();
+        int ok = mem_freeze(h2);
+        uint64_t t1 = plat_now_ns();
+        CHECK(ok == 1, "freeze of a region with 1 GiB of written memory behind it");
+        if (t1 - t0 < best) best = t1 - t0;
+        p[0x200000 + 0x1000 * (uint64_t)k] = 2;
+        CHECK(!mem_frozen(h2), "a write did not thaw the region");
+    }
+    printf("write-watch: freeze of a 2 MiB region with 1 GiB of written memory behind it: %.3f ms (best of 5)%s\n",
+           (double)best / 1e6, plat_mem_check ? ", the system asked as well (NX2NAVI_FREEZE_CHECK)" : "");
+    if (!plat_mem_check) CHECK(best < 1000000, "that freeze took %.3f ms (want under 1 ms)", (double)best / 1e6);
+    CHECK(mem_set_heap_size(0, &heap) == 0, "SetHeapSize 0");
+    if (plat_mem_check) {
+        printf("write-watch: %lld page-state answers compared with the system's, %lld differed\n",
+               (long long)plat_mem_checked, (long long)plat_mem_differed);
+        CHECK(plat_mem_checked > 0 && !plat_mem_differed, "the platform's page record differs from the system");
+    }
 }
 
 int probe_gfx_abi(void) {

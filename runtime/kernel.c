@@ -1551,8 +1551,7 @@ uint32_t kern_main_thread(Cpu **cpu) {
     if (g_main) rt_fatal("kern_main_thread: the main thread already runs on another host thread");
     const RtGuestLayout *L = mem_layout();
     uint64_t stack = L->stack.base + L->stack.size - MAIN_STACK;
-    if (!plat_mem_commit(stack, MAIN_STACK))
-        rt_fatal("kernel: commit the main thread stack at %#llx failed", (unsigned long long)stack);
+    mem_commit_stack(stack, MAIN_STACK);   // through memory.c: the stack region is write-watched (frozen regions)
     RtThread *t = thr_new(MAIN_PRIO, MAIN_CORE, CORE_MASK_ALL);
     t->started = 1;
     t->is_main = 1;

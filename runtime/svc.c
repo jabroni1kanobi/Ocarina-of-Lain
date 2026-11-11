@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "flight.h"
 #include "fs.h"
 #include "host.h"
 #include "kernel.h"
@@ -138,7 +139,7 @@ static void svc_body(Cpu *c, uint32_t imm, uint64_t pc);
 
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
     kern_checkpoint();
-    if (__builtin_expect(waitlog_on, 0) && waitlog_blocking(imm)) {   // NX2NAVI_WAITLOG: timed, then as below
+    if (__builtin_expect(waitlog_on | flight_x_on, 0) && waitlog_blocking(imm)) {   // NX2NAVI_WAITLOG / NX2NAVI_FLIGHT_X: timed, then as below
         uint64_t a0 = c->x[0], a1 = c->x[1], t0 = kern_now_ns();
         void *t = c->thread;
         int *d = kern_host_track && t ? kern_host_depth(t) : NULL;
@@ -149,7 +150,9 @@ void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
             __atomic_store_n(d, n, __ATOMIC_RELAXED);
             if (!n && kern_preempt_pending(t)) kern_host_left(t);
         }
-        waitlog_svc(c, imm, a0, a1, t0, kern_now_ns());
+        uint64_t t1 = kern_now_ns();
+        if (waitlog_on) waitlog_svc(c, imm, a0, a1, t0, t1);
+        if (flight_x_on) flight_x_svc(t0, t1);
         return;
     }
     if (__builtin_expect(!kern_host_track || !c->thread, 1)) {

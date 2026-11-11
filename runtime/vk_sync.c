@@ -12,9 +12,11 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "flight.h"
 #include "gfx.h"
 #include "host.h"
 #include "nvn_api.h"
+#include "prof.h"
 #include "vk.h"
 #include "platform/platform.h"
 
@@ -440,16 +442,37 @@ static void replay_pin(void) {
     state = -1;
     int core = strcmp(e, "last") ? atoi(e) : -1;
     uint64_t got;
+    // NX2NAVI_REPLAY_PIN_SETS=1 (test switch): the core is also reserved by CPU sets, which threads created later by the
+    // driver and libraries follow (the affinity sweep only moves the threads that exist at this moment).
+    const char *sets = cfg_get("NX2NAVI_REPLAY_PIN_SETS");
+    plat_reserve_cpu_sets = sets && *sets && strcmp(sets, "0");
+    // NX2NAVI_REPLAY_GUARD=1 (test switch): a helper thread holds the core's second logical processor while this thread
+    // records, so no other process's thread can share the physical core then (platform/win32.c, sibling guard).
+    const char *guard = cfg_get("NX2NAVI_REPLAY_GUARD");
+    plat_reserve_guard = guard && *guard && strcmp(guard, "0");
     int moved = plat_reserve_core(core, &got);
-    rt_log("vk: replay pin: core %d (mask %#llx) to the replaying thread, %d other threads moved off it%s", core,
-           (unsigned long long)got, moved, moved < 0 ? " (NOT applied)" : "");
+    rt_log("vk: replay pin: core %d (mask %#llx) to the replaying thread, %d other threads moved off it%s%s%s", core,
+           (unsigned long long)got, moved, moved < 0 ? " (NOT applied)" : "",
+           plat_reserve_cpu_sets == 2 ? "; CPU sets applied (later threads stay off it too)" : plat_reserve_cpu_sets ? "; CPU sets FAILED" : "",
+           plat_reserve_guard == 2 ? "; sibling guard running (the second logical processor is held while recording)"
+           : plat_reserve_guard ? "; sibling guard FAILED" : "");
 }
 
 uint64_t vk_sync_submit(const uint64_t *handles, int n) {
     vk_sync_start();
     replay_pin();
     VkCtx *c = vk_ctx();
+    uint64_t lk0 = FX_T0();   // NX2NAVI_FLIGHT_X: the render thread's wait while another thread records
     plat_mutex_lock(&sub_lock);
+    if (lk0) {
+        if (plat_thread_id() == prof_render_tid) {
+            FX_ADD(FX_SUBLOCK, lk0);
+            flight_x_probe();   // once per frame, before the recording is timed
+        }
+        memset(&flight_x_rec, 0, sizeof flight_x_rec);
+        flight_x_rec.handles = n;
+    }
+    uint64_t fxt = FX_T0();
     vk_mem_dirty_submit();   // NX2NAVI_TRACE=perf: what a mirror would upload before this submit
     uint64_t fence = __atomic_load_n(&issued, __ATOMIC_ACQUIRE) + 1;
     cur_fence = fence;
@@ -457,6 +480,8 @@ uint64_t vk_sync_submit(const uint64_t *handles, int n) {
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     uint64_t t0 = perf_begin();
+    plat_core_guard(1);   // NX2NAVI_REPLAY_GUARD: nobody else on this physical core while the recording runs
+    uint64_t fxc = flight_x_on ? plat_thread_cycles() : 0;
     vkBeginCommandBuffer(s->cb, &bi);
     vk_crumb(s->cb, VK_CRUMB_SUBMIT, fence);
     ts_begin(s->cb);
@@ -468,6 +493,35 @@ uint64_t vk_sync_submit(const uint64_t *handles, int n) {
     // The recorder is done with the part: the end-of-submission crumb, then the end, by the recorder when it records.
     if (!rec_end_cb(s->cb, VK_CRUMB_SUBMIT_END, fence)) vkEndCommandBuffer(s->cb);
     perf_replay(t0);
+    plat_core_guard(0);
+    if (flight_x_on) {   // NX2NAVI_FLIGHT_X: the CPU the recording used (against its wall time) and where it ran
+        plat_add64(&flight_x_ns[FX_REPLAY_CYC], (int64_t)(plat_thread_cycles() - fxc));
+        // which thread recorded, and the recording's stages outside the draws (vk_exec_record filled flight_x_rec)
+        uint32_t tid = plat_thread_id();
+        int role = tid == prof_render_tid ? 0 : tid == prof_main_tid ? 1 : 2;
+        uint64_t rec = fxt ? kern_now_ns() - fxt : 0;
+        const FlightXRec *x = &flight_x_rec;
+        if (role) plat_add64(&flight_x_ns[role == 1 ? FX_REC_MAIN : FX_REC_OTHER], (int64_t)rec);
+        plat_add64(&flight_x_ns[FX_PINS], (int64_t)x->pins);
+        plat_add64(&flight_x_ns[FX_USNAP], (int64_t)x->usnap);
+        plat_add64(&flight_x_ns[FX_MIRROR], (int64_t)x->mirror);
+        plat_add64(&flight_x_ns[FX_XFER], (int64_t)x->xfer);
+        if (flight_x_frame > 3000 && ((role && rec >= 1000000) || x->xfer_max >= 1000000 || x->pins >= 1000000 ||
+                                      x->usnap >= 2500000 || x->mirror >= 2500000))
+            rt_log("fx: frame %llu: recording by the %s thread %.2f ms, %d command buffers: pins %.2f, uniform snapshot "
+                   "%.2f, mirror %.2f, ops %.2f of which %d transfer ops %.2f (longest %s %.2f)",
+                   (unsigned long long)flight_x_frame + 1, role == 0 ? "RENDER" : role == 1 ? "MAIN" : "another", rec / 1e6,
+                   x->handles, x->pins / 1e6, x->usnap / 1e6, x->mirror / 1e6, x->walk / 1e6, x->xfer_n, x->xfer / 1e6,
+                   x->xfer_max ? nvn_op_name(x->xfer_max_op) : "-", x->xfer_max / 1e6);
+        if (plat_thread_id() == prof_render_tid) {
+            static int fx_cpu = -1;
+            int cpu = plat_cpu_number();
+            if (fx_cpu >= 0 && cpu != fx_cpu) plat_add64(&flight_x_ns[FX_CPUMOVE], 1000000);
+            fx_cpu = cpu;
+            plat_xchg64(&flight_x_ns[FX_CPU], (int64_t)cpu * 1000000);
+        }
+    }
+    uint64_t x0 = flight_x_on ? kern_now_ns() : 0;   // NX2NAVI_FLIGHT_X: upload flush + prologue + the driver's submit
     // After the recording: the uploads it asked for (and every earlier one) precede it in queue order.
     vk_upload_flush(0);
     VkCommandBuffer pro = prologue(c, fence);
@@ -484,6 +538,7 @@ uint64_t vk_sync_submit(const uint64_t *handles, int n) {
     vk_queue_lock();
     VkResult r = vkQueueSubmit2(c->gfx_queue, 1, &si, VK_NULL_HANDLE);
     vk_queue_unlock();
+    if (x0) plat_add64(&flight_x_ns[FX_SUBMIT], (int64_t)(kern_now_ns() - x0));
     if (r != VK_SUCCESS) {
         vk_device_fault_report(r);
         rt_fatal("vk: vkQueueSubmit2 of value %llu failed (%d)", (unsigned long long)fence, (int)r);

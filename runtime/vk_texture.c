@@ -16,11 +16,13 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "flight.h"
 #include "gfx.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_hmap.h"
 #include "nvn_tex.h"
+#include "prof.h"
 #include "tex.h"
 #include "vk.h"
 #include "vk_dlaa.h"
@@ -50,6 +52,13 @@ typedef struct Tex {
     uint8_t followed;             // some slot of another descriptor resolved to it (slot_resolve's follow): sticky
     uint8_t rel_quiet;            // released without a bump (vk_texture_release): rel_before is the bucket's generation then
     uint32_t n_up;                // uploads of this entry (vk_texture_debug)
+    uint64_t born, revived, written;   // frame (gfx_counters.frames + 1) of creation, last take-back, newest GPU write (vk_texture_life)
+    uint32_t n_rev;               // take-backs of a released entry
+    uint64_t use_frame, rbw_frame;   // frame (frames + 1) of the newest use of any kind / of the newest frame whose first use was a sample
+    uint8_t in_hist;              // listed in hist[] (history carry)
+    uint8_t rbw_run;              // consecutive frames up to rbw_frame whose first use was a sample (saturates at 255)
+    uint64_t rbw_who;             // who first sampled it in rbw_frame: compute shader hash and slot (vk_exec_draw.c history_hook), 0 for a draw
+    uint8_t shares_addr;          // created over another entry at its address (entry_of): its birth content may be an alias copy
     int last_ch;                  // last vk_mem_changed result of make_fresh: 1 written, 0 clean, -1 not tracked
     struct Tex *next_at;          // other entries at the same storage address
     uint8_t gpu_dirty;            // mirrored, and the GPU wrote the image after the last write-back to the storage
@@ -223,13 +232,22 @@ int vk_texture_dirty_slots_locked(uint64_t *pos, void (*fn)(int id, void *arg), 
 }
 
 static volatile int32_t tex_ready;
+int vk_history_carry;   // NX2NAVI_HISTORY_CARRY (history carry, vk_texture_sample_locked); 0 until tex_init has run
 static void tex_init(void *p) {
     (void)p;
+    vk_history_carry = rt_knob("HISTORY_CARRY", "1") != 0;   // once, at the first texture lock (game boot), before any sample
+    rt_log("vk: history carry %s (NX2NAVI_HISTORY_CARRY)", vk_history_carry ? "on" : "off");
     __atomic_store_n(&tex_ready, 1, __ATOMIC_RELEASE);
     return;
 }
 static void lock(void) {
     if (!__atomic_load_n(&tex_ready, __ATOMIC_ACQUIRE)) plat_once(&tex_once, tex_init, NULL);
+    if (__builtin_expect(flight_x_on, 0) && plat_thread_id() == prof_render_tid) {   // NX2NAVI_FLIGHT_X: the render thread's wait
+        uint64_t t0 = kern_now_ns();
+        plat_rmutex_lock(&tex_lock);
+        plat_add64(&flight_x_ns[FX_TEXLOCK], (int64_t)(kern_now_ns() - t0));
+        return;
+    }
     plat_rmutex_lock(&tex_lock);
 }
 static void unlock(void) { plat_rmutex_unlock(&tex_lock); }
@@ -549,10 +567,12 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
     Tex *e = calloc(1, sizeof *e);
     if (!e) rt_fatal("vk: out of memory for a texture");
     e->key = *k;
+    e->born = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1;
     e->t = *t;
     e->f = f;
     e->pub.addr = k->addr;
     VkImage img = VK_NULL_HANDLE;
+    uint64_t fx0 = FX_T0();
     if (scale == 1 && nvn_gpu_only(k->addr)) {   // storage in a physical or virtual pool: alias the pool memory (section 3.2)
         if (vkCreateImage(c->device, &ci, NULL, &img) == VK_SUCCESS && !bind_pool_memory(c, e, img, L.size)) {
             vkDestroyImage(c->device, img, NULL);
@@ -592,6 +612,29 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
             img = VK_NULL_HANDLE;
         }
     }
+    // NX2NAVI_RT_POOLS: a render target (or any other image the CPU does not fill) takes memory from the render-target
+    // pools (vk_headroom.c), which never make a device memory block inside this call: in VMA's default pool the
+    // block a burst of new targets needs was allocated here, on the render thread, 5.5-6.6 ms inside a recording.
+    int rt_pool = 0;
+    if (!img && !tex_mirrored(t) && vk_rt_pools_on()) {
+        if (vkCreateImage(c->device, &ci, NULL, &img) == VK_SUCCESS) {
+            VkMemoryDedicatedRequirements dr = {.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
+            VkMemoryRequirements2 mr2 = {.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, .pNext = &dr};
+            VkImageMemoryRequirementsInfo2 ri = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2, .image = img};
+            vkGetImageMemoryRequirements2(c->device, &ri, &mr2);
+            rt_pool = !dr.requiresDedicatedAllocation && vk_rt_pool_alloc(&mr2.memoryRequirements, &e->alloc);
+            if (rt_pool && vmaBindImageMemory(c->vma, e->alloc, img) != VK_SUCCESS) {
+                vmaFreeMemory(c->vma, e->alloc);
+                rt_pool = 0;
+            }
+            if (!rt_pool) {
+                vkDestroyImage(c->device, img, NULL);
+                img = VK_NULL_HANDLE, e->alloc = NULL;
+            }
+        } else {
+            img = VK_NULL_HANDLE;
+        }
+    }
     if (!img) {
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
         VkResult r = vmaCreateImage(c->vma, &ci, &ai, &img, &e->alloc, NULL);
@@ -606,6 +649,16 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
         VmaAllocationInfo own;
         vmaGetAllocationInfo(c->vma, e->alloc, &own);
         e->bytes = own.size;
+    }
+    if (fx0) {   // NX2NAVI_FLIGHT_X: what was created in play, and what its image and memory cost
+        uint64_t fxd = kern_now_ns() - fx0;
+        plat_add64(&flight_x_ns[FX_TEXIMG], (int64_t)fxd);
+        if (flight_x_frame > 3000)
+            rt_log("fx: frame %llu: texture image %ux%ux%u nvn fmt %#x levels %u layers %u samples %u usage %#x, %s, %.1f MiB, %.2f ms",
+                   (unsigned long long)flight_x_frame + 1, w, h, depth, d->format, levels, layers, (unsigned)samples,
+                   (unsigned)usage, !e->alloc ? "pool memory alias" : tex_mirrored(t) && samples == 1 ? "CPU-filled"
+                   : rt_pool ? "render target or GPU-only (render-target pool)" : "render target or GPU-only",
+                   e->bytes / 1048576.0, fxd / 1e6);
     }
     VkTexImage *p = &e->pub;
     p->image = img;
@@ -699,7 +752,31 @@ static void rel_unlink(Tex *e) {
     e->rel_prev = e->rel_next = NULL;
 }
 
+// History carry (NX2NAVI_HISTORY_CARRY, vk_texture_sample_locked): GPU-written images recently written whose first use of a
+// frame was a sample, the candidates for the history of an image the game re-placed. Texture lock held; an entry leaves
+// when destroyed, or when the list is full and its last such frame is older than the previous one.
+#define HIST_N 128
+static Tex *hist[HIST_N];
+static int nhist;
+static uint64_t n_carry, n_carry_amb, n_carry_pass, n_carry_skip, n_hist_full;
+static uint64_t frame_now(void) { return __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1; }
+
+static void hist_add(Tex *e, uint64_t F) {
+    if (e->in_hist) return;
+    for (int i = 0; nhist == HIST_N && i < nhist; i++)
+        if (hist[i]->rbw_frame + 1 < F) hist[i]->in_hist = 0, hist[i] = hist[--nhist];
+    if (nhist == HIST_N) { n_hist_full++; return; }
+    hist[nhist++] = e, e->in_hist = 1;
+}
+
+static void hist_drop(Tex *e) {
+    for (int i = 0; e->in_hist && i < nhist; i++)
+        if (hist[i] == e) { hist[i] = hist[--nhist]; break; }
+    e->in_hist = 0;
+}
+
 static void destroy_tex(Tex *e) {
+    hist_drop(e);
     own_remove(e);
     n_site[0]++;
     tex_gen_bump(e->key.addr);
@@ -1235,6 +1312,98 @@ static int alias_copy(Tex *e, const Tex *src) {
     return 1;
 }
 
+static int same_desc(const Tex *a, const Tex *b) {   // keys equal apart from the address
+    TexKey x = a->key, y = b->key;
+    x.addr = y.addr = 0;
+    return !memcmp(&x, &y, sizeof x);
+}
+
+// d's content into t, every level and layer, in the replay stream (no pass is open: the inline helpers end one). Colour
+// goes through alias_copy's buffer (bound images may share memory); depth / stencil image to image, unless both images
+// are bound into pool memory (an image copy between overlapping memory is invalid). Layouts stay GENERAL. 0: not done.
+static int carry_copy(Tex *t, const Tex *d) {
+    const VkTexImage *p = &t->pub, *q = &d->pub;
+    if (p->format != q->format || p->type != q->type || p->width != q->width || p->height != q->height ||
+        p->depth != q->depth || p->levels != q->levels || p->layers != q->layers || p->samples != q->samples || p->levels > 16)
+        return 0;
+    if (!t->f.depth && !t->f.stencil) return alias_compatible(t, d) && alias_copy(t, d);
+    if (t->bound_to && d->bound_to) return 0;
+    int reopen;
+    VkCommandBuffer cb = vk_exec_inline_begin(&reopen);
+    if (!cb) return 0;
+    VkImageCopy rg[16];
+    for (uint32_t lv = 0; lv < p->levels; lv++) {
+        VkImageSubresourceLayers sl = {p->aspect, lv, 0, p->layers};
+        rg[lv] = (VkImageCopy){sl, {0, 0, 0}, sl, {0, 0, 0}, {mip(p->width, lv), mip(p->height, lv), mip(p->depth, lv)}};
+    }
+    barrier(cb, ALL_RW, ALL_RW);
+    vkCmdCopyImage(cb, q->image, VK_IMAGE_LAYOUT_GENERAL, p->image, VK_IMAGE_LAYOUT_GENERAL, p->levels, rg);
+    barrier(cb, ALL_RW, ALL_RW);
+    vk_exec_inline_end(reopen);
+    return 1;
+}
+
+// A draw (in_pass) or a dispatch samples slot id (vk_exec_draw.c bind_resources, texture lock held). Stamps the entry's
+// use_frame, and rbw_frame when this is its first use of the frame (every other use kind stamps use_frame only:
+// vk_texture_get, vk_texture_gpu_written, vk_texture_storage_bound_locked). On that first use, a GPU-written (or new
+// and not CPU-fed) image whose last write is older than the previous frame takes the content of the one history image
+// of the same descriptor at another address: written the previous frame, first read then, untouched this frame. The
+// carry is not recorded inside a render pass. t->written is left alone, so a missing real write stays visible.
+// Called only with vk_history_carry set, and (vk_exec_draw.c history_hook) once per slot and frame while the slot
+// resolves as before. Returns 0 when the slot names no texture.
+int vk_texture_sample_locked(int id, int in_pass, uint64_t who) {
+    Tex *t = (Tex *)vk_texture_by_id_locked(id, NULL, NULL);   // pub is the first member
+    uint64_t F = frame_now();
+    if (!t) return 0;
+    if (t->use_frame == F) return 1;
+    uint64_t idle = t->use_frame;   // newest use before this one
+    t->use_frame = F;
+    unsigned run = t->rbw_frame + 1 == F ? t->rbw_run + 1u : 1u;   // this image's run of frames that began with a sample
+    // T must have been idle the previous frame too (a steady image that is merely not rewritten every frame is not a
+    // re-placed one), CPU-visible images are left alone, and so is a birth content copied from a live image at the same
+    // address (entry_of's alias_copy: the same bytes seen through another descriptor).
+    if (idle + 1 < F && t->written + 1 < F && !t->pub.mirrored && !(t->shares_addr && t->born == F) &&
+        (t->pub.gpu_owned || (t->born == F && !t->uploaded))) {
+        Tex *d = NULL;
+        int n = 0;
+        for (int i = 0; i < nhist; i++) {
+            Tex *p = hist[i];
+            if (p != t && p->rbw_frame + 1 == F && p->rbw_run >= 2 && p->rbw_who == who && p->use_frame != F && p->written + 1 >= F && same_desc(p, t)) d = p, n++;
+        }
+        if (n > 1) {
+            static uint64_t seen[16];
+            static int nseen;
+            uint64_t k = (uint64_t)t->t.d.format << 48 ^ (uint64_t)t->pub.width << 28 ^ (uint64_t)t->pub.height << 8 ^ t->pub.layers;
+            int known = 0;
+            for (int i = 0; i < nseen; i++) known |= seen[i] == k;
+            n_carry_amb++;
+            if (!known && nseen < 16) {
+                seen[nseen++] = k;
+                rt_log("vk: history carry ambiguous: nvn fmt %#x %ux%ux%u, %d candidates at frame %llu (once per descriptor)",
+                       t->t.d.format, t->pub.width, t->pub.height, t->pub.layers, n, (unsigned long long)F);
+            }
+        } else if (n == 1 && in_pass) {
+            n_carry_pass++;
+        } else if (n == 1 && !carry_copy(t, d)) {
+            n_carry_skip++;
+        } else if (n == 1) {
+            n_carry++;
+            d->use_frame = F;   // taken: no second image of this descriptor copies it in the same frame
+            run = d->rbw_run + 1u;   // T takes over D's role and its run
+            if (n_carry <= 200)
+                rt_log("vk: history carried: nvn fmt %#x %ux%ux%u 0x%llx -> 0x%llx at frame %llu (T written f%llu idle since f%llu, D written f%llu run %u) who %016llx",
+                       t->t.d.format, t->pub.width, t->pub.height, t->pub.layers, (unsigned long long)d->pub.addr,
+                       (unsigned long long)t->pub.addr, (unsigned long long)F, (unsigned long long)t->written,
+                       (unsigned long long)idle, (unsigned long long)d->written, (unsigned)d->rbw_run, (unsigned long long)who);
+            hist_add(t, F);   // a history image itself from now on, though its written stays old until a pass draws in it
+        }
+    }
+    t->rbw_run = (uint8_t)(run > 255 ? 255 : run);
+    t->rbw_frame = F, t->rbw_who = who;
+    if (t->pub.gpu_owned && t->written + 2 >= F) hist_add(t, F);
+    return 1;
+}
+
 // Descriptors whose image creation failed (VRAM exhausted, an unsupported format): not tried again for 2 s, so a
 // draw that names one every frame does not repeat a failing allocation on every use. Texture lock held.
 #define FAILED_HOLD 32
@@ -1284,6 +1453,7 @@ static Tex *entry_of(const tex_t *t) {
                 src = p;
         }
         if (alias) perf_count(PERF_CNT_TEX_ALIAS);
+        e->shares_addr = (uint8_t)alias;
         if (tex_alias) {
             if (src && alias_copy(e, src)) {
                 n_alias_copied++;
@@ -1308,6 +1478,7 @@ static Tex *entry_of(const tex_t *t) {
         n_site[1]++;
         tex_gen_bump(k.addr);
     }
+    if (e->released) e->revived = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1, e->n_rev++;
     if (e->released && e->rel_quiet && e->rel_b == agen_idx(k.addr) &&
         __atomic_load_n(&agen[e->rel_b], __ATOMIC_RELAXED) == e->rel_before) {
         // released quietly and nothing at its bucket changed since: every slot still resolves to it
@@ -1333,6 +1504,13 @@ static Tex *entry_of(const tex_t *t) {
     return e;
 }
 
+void vk_texture_life(const VkTexImage *img, uint64_t out[5]) {
+    lock();
+    const Tex *e = (const Tex *)img;   // pub is the first member
+    out[0] = e->born, out[1] = e->revived, out[2] = e->n_rev, out[3] = e->rel_frame ? e->rel_frame + 1 : 0, out[4] = e->written;
+    unlock();
+}
+
 // vk_dump: upload bookkeeping of an image vk_texture_get / vk_texture_by_id returned. pages_written: whether its
 // storage pages were written since the last check (1, 0, -1 not tracked); the query leaves that check's state alone.
 void vk_texture_debug(const VkTexImage *img, uint32_t *uploads, int *last_change, int *pages_written) {
@@ -1349,7 +1527,7 @@ const VkTexImage *vk_texture_get(const tex_t *t) {
     if (!t || !t->mem) return NULL;
     lock();
     Tex *e = entry_of(t);
-    if (e) make_fresh(e);
+    if (e) make_fresh(e), e->use_frame = frame_now();   // a render target, a copy source or destination: a use, not a sample
     unlock();
     return e ? &e->pub : NULL;
 }
@@ -1390,6 +1568,7 @@ void vk_texture_gpu_written(const tex_t *t) {
         e->chash_ok = 0;   // the image now holds the GPU's content: matching storage bytes no longer mean "unchanged"
         uint64_t f = vk_exec_recording_fence();
         if (f > e->wr_fence) e->wr_fence = f;
+        e->written = e->use_frame = frame_now();
         if (e->pub.mirrored) {
             e->gpu_dirty = 1;
             storage_rewritten(e, 0, &e->gpu_gen);   // CPU writes up to here are older than this render
@@ -1741,6 +1920,10 @@ void vk_texture_new_submit(void) {
                rel_bytes / 1048576.0, (unsigned long long)n_cap_drops, (unsigned long long)n_pressure_drops,
                (unsigned long long)n_commit_drops);
         n_cap_drops = n_pressure_drops = n_commit_drops = 0;
+        rt_log("perf: frame %llu: history carry (totals): done %llu, ambiguous %llu, skipped in a pass %llu, not copied %llu, "
+               "history list full %llu, listed %d", (unsigned long long)f * 60, (unsigned long long)n_carry,
+               (unsigned long long)n_carry_amb, (unsigned long long)n_carry_pass, (unsigned long long)n_carry_skip,
+               (unsigned long long)n_hist_full, nhist);
     }
     unlock();
 }
@@ -2063,6 +2246,7 @@ void vk_texture_storage_bound_locked(const VkTexImage *img) {
     Tex *e = (Tex *)img;   // pub is the first member
     uint64_t f = vk_exec_recording_fence();
     if (f > e->wr_fence) e->wr_fence = f;
+    e->written = e->use_frame = frame_now();   // an image store is a use, not a sample
 }
 
 uint64_t vk_texture_last_write(const tex_t *t) {

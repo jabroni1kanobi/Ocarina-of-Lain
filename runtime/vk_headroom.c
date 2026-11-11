@@ -24,7 +24,9 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "flight.h"
 #include "host.h"
+#include "prof.h"
 #include "vk.h"
 #include "platform/platform.h"
 
@@ -45,8 +47,115 @@ static struct {
     int want;                    // NX2NAVI_VRAM_HEADROOM_BLOCKS
 } H;
 
+// Render-target pools (NX2NAVI_RT_POOLS=1, a test switch; vk_texture.c create_tex asks vk_rt_pool_alloc). The game makes
+// its transient render targets anew all the time (a texture entry is keyed by guest address + descriptor, and the
+// engine's allocator moves them), so images of 0.1 to 17 MiB are created and destroyed every frame. In VMA's default
+// pool that needs a new 256 MiB block now and then, and VMA creates a block inside the allocation that found no room
+// and under its pool lock: on the render thread, inside a recording, 5.5-6.6 ms each (lab fx4: "vkAllocateMemory 256.0
+// MiB of type 0 by the RENDER thread" at the owner's middle stutter, tick ~5690; the headroom above is off there, the
+// heap being over its 85 % rule with the 4 GiB texture pool). A block made by this thread in the same pool would hold
+// the render thread's allocations just as long (the pool lock: vk_memory.c, staging pool). So render targets get
+// pools of ONE block each: this thread makes the next pool while the newest is still unused, an allocation tries the
+// pools in turn and never makes a block, and a pool is never given back (the released targets kept by vk_texture.c
+// fill them to a plateau). With no pool that has room the image takes the default pool as before.
+#define RTP_MAX 40
+#define RTP_BLOCK (256ull << 20)
+#define RTP_IMAGE_MAX (64ull << 20)    // larger images keep the default pool
+#define RTP_MARGIN (512ull << 20)      // of the heap's budget left free when a pool is added
+static struct {
+    int on;
+    VmaPool pool[RTP_MAX];
+    volatile int32_t n;        // pools made
+    volatile int32_t type;     // their memory type; -1 until the first render target asked
+    volatile int32_t hint;     // the pool the last allocation came from
+    volatile int32_t kick;     // the newest pool is in use, or an allocation found no room
+    volatile int64_t taken, missed;
+    int full_logged;
+} RP = {.type = -1};
+
+static void rp_kick(void) {
+    if (!H.started) return;
+    __atomic_store_n(&RP.kick, 1, __ATOMIC_RELEASE);
+    plat_event_set(&H.ev);
+}
+
+int vk_rt_pools_on(void) { return RP.on && H.started; }
+
+int vk_rt_pool_alloc(const VkMemoryRequirements *mr, VmaAllocation *out) {
+    if (!RP.on || !H.started) return 0;
+    VkCtx *c = vk_ctx();
+    int32_t type = __atomic_load_n(&RP.type, __ATOMIC_ACQUIRE);
+    if (type < 0) {   // the first render target names the memory type; the pools come from the headroom thread
+        VmaAllocationCreateInfo ai = {.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT};
+        uint32_t t;
+        if (vmaFindMemoryTypeIndex(c->vma, mr->memoryTypeBits, &ai, &t) != VK_SUCCESS) return 0;
+        int32_t none = -1;
+        __atomic_compare_exchange_n(&RP.type, &none, (int32_t)t, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        rp_kick();
+        return 0;
+    }
+    if (!(mr->memoryTypeBits >> type & 1) || mr->size > RTP_IMAGE_MAX) return 0;
+    int n = __atomic_load_n(&RP.n, __ATOMIC_ACQUIRE), h = __atomic_load_n(&RP.hint, __ATOMIC_RELAXED);
+    for (int k = -1; k < n; k++) {   // the pool that had room last, then the oldest first (the newest stays the spare)
+        int i = k < 0 ? h : k;
+        if (i >= n || (k >= 0 && i == h)) continue;
+        VmaAllocationCreateInfo ai = {.pool = RP.pool[i]};
+        if (vmaAllocateMemory(c->vma, mr, &ai, out, NULL) != VK_SUCCESS) continue;
+        __atomic_store_n(&RP.hint, i, __ATOMIC_RELAXED);
+        if (i == n - 1) rp_kick();   // the spare is in use now: the next one, off this thread
+        plat_inc64(&RP.taken);
+        FX_COUNT(FX_RTPOOL, 1);
+        return 1;
+    }
+    plat_inc64(&RP.missed);
+    rp_kick();
+    return 0;
+}
+
+// The headroom thread, H.lock held: one more pool when the newest is in use and the heap has the room.
+static void rp_top_up(const VkCtx *c) {
+    int32_t type = __atomic_load_n(&RP.type, __ATOMIC_ACQUIRE);
+    if (type < 0) return;
+    __atomic_store_n(&RP.kick, 0, __ATOMIC_RELEASE);
+    int n = RP.n;
+    if (n >= RTP_MAX) return;
+    if (n) {
+        VmaStatistics st;
+        vmaGetPoolStatistics(c->vma, RP.pool[n - 1], &st);
+        if (!st.allocationCount) return;   // the spare is still unused
+    }
+    VmaBudget b[VK_MAX_MEMORY_HEAPS];
+    vmaGetHeapBudgets(c->vma, b);
+    const VmaBudget *hb = &b[c->mem_props.memoryTypes[type].heapIndex];
+    if (!hb->budget || hb->usage + RTP_BLOCK + RTP_MARGIN > hb->budget) {
+        if (!RP.full_logged++)
+            rt_log("vk: render-target pools: no room for pool %d (%llu of %llu MiB in use); new targets take the default pool",
+                   n + 1, (unsigned long long)(hb->usage >> 20), (unsigned long long)(hb->budget >> 20));
+        return;
+    }
+    VmaPoolCreateInfo pi = {.memoryTypeIndex = (uint32_t)type, .blockSize = RTP_BLOCK, .minBlockCount = 1, .maxBlockCount = 1};
+    VmaPool p;
+    if (vmaCreatePool(c->vma, &pi, &p) != VK_SUCCESS) return;
+    RP.pool[n] = p;
+    __atomic_store_n(&RP.n, n + 1, __ATOMIC_RELEASE);
+    RP.full_logged = 0;
+    rt_log("vk: render-target pools: pool %d made ahead (256 MiB, memory type %d; %lld images placed, %lld found no room so far)",
+           n + 1, (int)type, (long long)RP.taken, (long long)RP.missed);
+}
+
+static void rp_destroy(const VkCtx *c) {   // before the allocator goes; the textures went first (vk_texture.c)
+    for (int i = 0; i < RP.n; i++) vmaDestroyPool(c->vma, RP.pool[i]);
+    RP.n = 0;
+}
+
 static void VKAPI_PTR on_allocate(VmaAllocator a, uint32_t type, VkDeviceMemory m, VkDeviceSize size, void *user) {
     (void)a, (void)m, (void)size, (void)user;
+    FX_COUNT(FX_DEV_ALLOCS, 1);
+    if (flight_x_on && flight_x_frame > 3000) {   // NX2NAVI_FLIGHT_X: every device memory allocation in play, and who made it
+        uint32_t tid = plat_thread_id();
+        rt_log("fx: frame %llu: vkAllocateMemory %.1f MiB of type %u by the %s thread", (unsigned long long)flight_x_frame + 1,
+               size / 1048576.0, type, tid == H.tid ? "headroom" : tid == prof_render_tid ? "RENDER" : tid == prof_main_tid ? "MAIN" : "another");
+    }
     if (!H.on || type >= 64) return;
     if (plat_thread_id() == H.tid) {
         plat_inc64(&H.made);
@@ -65,6 +174,8 @@ const VmaDeviceMemoryCallbacks *vk_headroom_callbacks(void) {
     H.want = n && *n ? atoi(n) : 1;
     if (H.want < 1) H.want = 1;
     if (H.want > 8) H.want = 8;
+    const char *rp = cfg_get("NX2NAVI_RT_POOLS");
+    RP.on = H.on && rp && *rp && strcmp(rp, "0");
     return H.on ? &cb : NULL;
 }
 
@@ -135,6 +246,7 @@ static void headroom_main(void *arg) {
         const VkCtx *c = H.stop ? NULL : vk_ctx();
         for (uint32_t t = 0; c && t < c->mem_props.memoryTypeCount && t < 64; t++)
             if (watch >> t & 1) top_up(c, t);
+        if (c && RP.on) rp_top_up(c);
         int stop = H.stop;
         if (stop && (c = vk_ctx()))
             for (uint32_t t = 0; t < 64; t++) drop_anchor(c, t);
@@ -150,6 +262,7 @@ void vk_headroom_stop(void) {
     H.stop = 1;
     const VkCtx *c = vk_ctx();
     for (uint32_t t = 0; c && t < 64; t++) drop_anchor(c, t);
+    if (c) rp_destroy(c);
     plat_mutex_unlock(&H.lock);
     plat_event_set(&H.ev);
 }
@@ -166,4 +279,7 @@ void vk_headroom_start(void) {
     H.started = 1;
     rt_log("vk: headroom: the next VMA block of each memory type in use is allocated on a background thread "
            "(NX2NAVI_VRAM_HEADROOM=0 turns it off)");
+    if (RP.on)
+        rt_log("vk: render-target pools on (NX2NAVI_RT_POOLS): render targets take memory from one-block pools made "
+               "ahead on the headroom thread, never from a block made inside a recording");
 }

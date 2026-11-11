@@ -240,6 +240,7 @@ static void save_shot(const tex_t *t, const char *path) {
     rt_logf("boot: shot %s (%ux%u)\n", path, w, h);
 }
 
+// NX2NAVI_SHOTS=k<lo>-<hi>:<step> takes every step-th present whose input-script tick (frame_step_ticks) is in [lo, hi].
 // NX2NAVI_SHOTS=lo-hi:step [NX2NAVI_SHOTS_DIR=dir]: every step-th present in [lo, hi] saved as <dir>/f<n>.png (n the
 // present), box-filtered to 480x270; NX2NAVI_SHOTS=w<lo>-<hi>:<step> takes them by world-clock seconds instead, the first
 // present at or after each step (full size with NX2NAVI_SHOTS_FULL=1), for finding short glitches. Pipeline builds stay asynchronous, so the
@@ -248,7 +249,7 @@ static void series_shot(const tex_t *t, uint64_t n) {
     static int parsed;
     static unsigned long long lo, hi, step, next;
     static const char *dir;
-    static int full, world;
+    static int full, world, ticks;
     if (!parsed) {
         full = cfg_get("NX2NAVI_SHOTS_FULL") != NULL;
         const char *e = cfg_get("NX2NAVI_SHOTS");
@@ -256,6 +257,7 @@ static void series_shot(const tex_t *t, uint64_t n) {
         if (e && e[0] == 'w' && sscanf(e + 1, "%lf-%lf:%lf", &wl, &wh, &ws) == 3 && ws > 0)   // world-clock seconds
             world = 1, lo = (unsigned long long)(wl * 1e6), hi = (unsigned long long)(wh * 1e6),
             step = (unsigned long long)(ws * 1e6), next = lo;
+        else if (e && e[0] == 'k' && sscanf(e + 1, "%llu-%llu:%llu", &lo, &hi, &step) == 3 && step) ticks = 1;
         else if (!e || sscanf(e, "%llu-%llu:%llu", &lo, &hi, &step) != 3 || !step) hi = 0;
         dir = cfg_get("NX2NAVI_SHOTS_DIR") ? cfg_get("NX2NAVI_SHOTS_DIR") : ".";
         if (hi) plat_file_mkdir_p(dir);
@@ -265,7 +267,7 @@ static void series_shot(const tex_t *t, uint64_t n) {
         int64_t w = frame_step_world_us();
         if (w < 0 || (unsigned long long)w < next || next > hi) return;
         while (next <= (unsigned long long)w) next += step;
-    } else if (n < lo || n > hi || (n - lo) % step) {
+    } else if (ticks ? frame_step_ticks() < lo || frame_step_ticks() > hi || n % step : n < lo || n > hi || (n - lo) % step) {
         return;
     }
     int fmt = t->d.format;

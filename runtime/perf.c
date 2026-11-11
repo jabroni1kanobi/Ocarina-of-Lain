@@ -83,9 +83,12 @@ static volatile int64_t render_wait_ns;    // the same on the render thread
 void (*perf_gpu_stats)(PerfGpu *out);
 
 void perf_gpu_wait(uint64_t t0) {
-    if (!t0 || !__atomic_load_n(&perf_on, __ATOMIC_RELAXED)) return;
+    if (!t0 || !(__atomic_load_n(&perf_on, __ATOMIC_RELAXED) | flight_x_on)) return;
     int64_t d = (int64_t)(kern_now_ns() - t0);
-    plat_add64(plat_thread_id() == prof_render_tid ? &render_wait_ns : &other_wait_ns, d);
+    int render = plat_thread_id() == prof_render_tid;
+    if (flight_x_on) plat_add64(&flight_x_ns[render ? FX_GPUWAIT_R : FX_GPUWAIT_O], d);
+    if (!__atomic_load_n(&perf_on, __ATOMIC_RELAXED)) return;
+    plat_add64(render ? &render_wait_ns : &other_wait_ns, d);
 }
 
 static volatile int64_t replay_ns;         // perf_replay: summed over the window, any thread
@@ -272,6 +275,7 @@ void perf_present(uint64_t frame) {
     if (__atomic_load_n(&overlay, __ATOMIC_RELAXED))   // the overlay's only cost while it is off: this branch
         perfmon_frame(now, d, frame_ns, rep, __atomic_load_n(&counts[PERF_CNT_TEX_UP], __ATOMIC_RELAXED));
     kern_core_diag_frame(frame, d);
+    if (flight_x_on) plat_add64(&flight_x_ns[FX_REPLAY], (int64_t)rep);
     if (flight_on) flight_frame(frame, now, d, frame_ns, counts);
     if (waitlog_on) waitlog_frame(frame, d);
     if (!(rt_trace & RT_TRACE_PERF)) {

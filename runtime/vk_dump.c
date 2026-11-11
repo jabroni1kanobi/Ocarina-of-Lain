@@ -249,14 +249,14 @@ static void write_images(const Job *j) {
         for (int c = 0; c < j->f->nc && c < 3; c++) m = fmaxf(m, fmaxf(fabsf(mx[c]), fabsf(mn[c])));
         scale = 1.f / m;
     }
-    for (int pass = 0; pass < (mode == M_FLOAT ? 2 : 1); pass++) {
+    for (int pass = 0; pass < (mode == M_FLOAT || (mode == M_DEPTH && !strncmp(j->name, "rd_", 3)) ? 2 : 1); pass++) {
         for (uint64_t i = 0; i < n; i++) {
             const float *o = px + 4 * i;
             for (int c = 0; c < 3; c++) {
                 float x = o[grey ? 0 : c];
                 if (mode == M_SNORM) x = x * .5f + .5f;
                 else if (mode == M_INT) x *= scale;
-                else if (mode == M_DEPTH) x = range > 0 ? (x - lo) / range : 0;
+                else if (mode == M_DEPTH) x = pass ? x : range > 0 ? (x - lo) / range : 0;   // pass 1 (rd_ copies): full 0..1 range
                 else if (mode == M_FLOAT && pass) x = x > 0 ? x / (1 + x) : 0;
                 out[4 * i + c] = u8(x);
             }
@@ -264,7 +264,7 @@ static void write_images(const Job *j) {
             if (isnan_[i]) out[4 * i] = 255, out[4 * i + 1] = 0, out[4 * i + 2] = 255;
         }
         char path[600];
-        snprintf(path, sizeof path, "%s/%s%s.png", dir, j->name, pass ? "_tm" : "");
+        snprintf(path, sizeof path, "%s/%s%s.png", dir, j->name, pass ? (mode == M_DEPTH ? "_full" : "_tm") : "");
         rt_write_png(path, out, pw, ph);
     }
     if (mode == M_FLOAT && j->f->nc == 4) {   // ..._a.png: the alpha channel, which the images above drop
@@ -367,6 +367,59 @@ static const char *copy_region(VkExec *ex, VkImage image, VkFormat vf, VkImageAs
 static const char *copy_out(VkExec *ex, VkImage image, VkFormat vf, VkImageAspectFlags aspect, uint32_t level,
                             uint32_t layer, uint32_t w, uint32_t h, uint32_t d, const char *name) {
     return copy_region(ex, image, vf, aspect, level, layer, 0, (VkExtent3D){w, h, d}, w, h, d, name);
+}
+
+// ---- NX2NAVI_DUMP_READ=<w>x<h>[,...]: in a dumped frame a texture of such a size sampled by a dispatch or a render pass is
+// copied as that reader sees it (after the dispatch; at the end of a pass that does not render into it), every layer, to
+// rd_<pass>_<stage><slot>_tex<id>_vk<image>_a<addr>_L<layer>_...png (depth also as ..._full.png, 0..1 unscaled). Read again
+// at its first sampling after a pass or dispatch wrote it. Not gated by NX2NAVI_DUMP_ONLY.
+typedef struct { VkImage image; VkFormat format; uint32_t w, h, layers; int id, slot, stage; uint64_t addr; } Rd;
+static uint32_t rd_size[8][2];
+static int rd_nsize, rd_n, rd_nq;
+static struct { VkImage image; int st; } rd_seen[32];   // st: 1 copied, 2 written since
+static Rd rd_q[16];
+static uint64_t rd_frame;
+
+static void rd_mark(VkImage im) {
+    for (int i = 0; i < rd_n; i++)
+        if (rd_seen[i].image == im && rd_seen[i].st == 1) rd_seen[i].st = 2;
+}
+
+static void rd_note(const VkTexImage *t, int id, int slot, int stage, int how) {   // how: 0 sampled, 1 stored, 2 loaded
+    int hit = 0;
+    for (int k = 0; k < rd_nsize; k++) hit |= rd_size[k][0] == t->width && rd_size[k][1] == t->height;
+    if (!hit || t->samples > 1) return;
+    if (rd_frame != dump_frame) rd_frame = dump_frame, rd_n = rd_nq = 0;
+    if (how == 1) { rd_mark(t->image); return; }
+    if (how == 2) return;
+    int i = 0;
+    while (i < rd_n && rd_seen[i].image != t->image) i++;
+    if (i == rd_n) {
+        if (rd_n == 32) return;
+        rd_seen[rd_n].image = t->image, rd_seen[rd_n++].st = 0;
+    }
+    if (rd_seen[i].st == 1 || rd_nq == 16) return;
+    rd_seen[i].st = 1;
+    rd_q[rd_nq++] = (Rd){t->image, t->format, t->width, t->height, t->layers, id, slot, stage, t->addr};
+}
+
+static void rd_flush(VkExec *ex, int n, int pass) {   // pass: after a render pass (its targets are ex->color/depth)
+    for (int i = 0; i < rd_nq; i++) {
+        const Rd *r = &rd_q[i];
+        int dep = r->format >= VK_FORMAT_D16_UNORM && r->format <= VK_FORMAT_D32_SFLOAT_S8_UINT, tgt = pass && ex->depth.image == r->image;
+        for (int c = 0; pass && c < 8; c++) tgt |= ex->color[c].image == r->image;
+        for (uint32_t k = 0; k < r->layers; k++) {
+            char fn[16], name[220];
+            snprintf(name, sizeof name, "rd_%04d_%s%d_tex%d_vk%llx_a%llx_L%u_%ux%u_%s", n, r->stage == 5 ? "cs" : r->stage ? "fs" : "vs",
+                     r->slot, r->id, (unsigned long long)(uintptr_t)r->image, (unsigned long long)r->addr, k, r->w, r->h,
+                     fmt_name(r->format, fn));
+            const char *why = copy_out(ex, r->image, r->format, dep ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, 0, k,
+                                       r->w, r->h, 1, name);
+            fprintf(passes_f, "  read-copy slot %d tex %d layer %u%s -> %s.png%s%s\n", r->slot, r->id, k,
+                    tgt ? " (also a target of this pass: content as of its end)" : "", name, why ? " skipped: " : "", why ? why : "");
+        }
+    }
+    rd_nq = 0;
 }
 
 // ---- NX2NAVI_DUMP_BUF=<addr>:<size>[:<off>:<stride>:<w>:<h>]: after every pass and dispatch that is logged, the GPU
@@ -697,6 +750,10 @@ static void describe_bindings(Str *b, const VkExec *ex, const VkPipeInfo *info) 
             uint32_t ups;
             int last, wr;
             vk_texture_debug(t, &ups, &last, &wr);
+            uint64_t lf[5];
+            vk_texture_life(t, lf);
+            sp(b, " | life born f%llu revived f%llu x%llu released f%llu written f%llu (0 never)", (unsigned long long)lf[0],
+               (unsigned long long)lf[1], (unsigned long long)lf[2], (unsigned long long)lf[3], (unsigned long long)lf[4]);
             sp(b, " | addr %#llx mirrored %d gpu_owned %d bound %d uploads %u last-check %d written-since %d",
                (unsigned long long)t->addr, t->mirrored, t->gpu_owned, t->bound, ups, last, wr);
             uint8_t ssw[4] = {0};
@@ -705,6 +762,7 @@ static void describe_bindings(Str *b, const VkExec *ex, const VkPipeInfo *info) 
                ssw[3]);
             if (hv && v.set_swizzle) sp(b, " view %u%u%u%u", v.swz[0], v.swz[1], v.swz[2], v.swz[3]);
             sp(b, "\n");
+            if (rd_nsize) rd_note(t, NVN_HANDLE_TEX(h), slot, st, img ? (r->flags & 4 ? 1 : 2) : 0);
             int wanted = 0;
             for (int k = 0; k < nwant_tex; k++)
                 wanted |= want_tex[k][1] ? want_tex[k][0] == t->width && want_tex[k][1] == t->height
@@ -852,6 +910,9 @@ void vk_dump_pass_end(VkExec *ex) {
     if (ents_over) fprintf(passes_f, "  ... %d more draws with other pipeline/texture sets\n", ents_over);
     if (!pass_skip) flush_luts(ex, n);
     else nluts = 0;
+    rd_flush(ex, n, 1);
+    for (int c = 0; c < 8; c++) rd_mark(ex->color[c].image);
+    rd_mark(ex->depth.image);
     buf_snap(ex, n);
     fflush(passes_f);
     nents = ents_over = pass_draws = 0;
@@ -868,9 +929,9 @@ void vk_dump_dispatch(VkExec *ex, const GfxShader *cs, VkPipeline p, const VkPip
     last_targets = 0;
     Str b = {0};
     describe_bindings(&b, ex, info);
-    fprintf(passes_f, "pass %04d: dispatch %dx%dx%d cs %016llx prog %llu caller %#llx, fence %llu\n%s", n, d->x, d->y,
+    fprintf(passes_f, "pass %04d: dispatch %dx%dx%d cs %016llx prog %llu caller %#llx, fence %llu, frame %llu\n%s", n, d->x, d->y,
             d->z, (unsigned long long)shader_hash(cs), (unsigned long long)(ex->prog ? ex->prog->serial : 0),
-            (unsigned long long)d->caller, (unsigned long long)ex->fence, b.s ? b.s : "");
+            (unsigned long long)d->caller, (unsigned long long)ex->fence, (unsigned long long)frame_now(), b.s ? b.s : "");
     free(b.s);
     if (dump_ubo) {   // NX2NAVI_DUMP_UBO: the NVN2 push constants as 64-bit words
         fprintf(passes_f, "    push:");
@@ -909,6 +970,7 @@ void vk_dump_dispatch(VkExec *ex, const GfxShader *cs, VkPipeline p, const VkPip
     }
     if (!pass_skip) flush_luts(ex, n);
     else nluts = 0;
+    rd_flush(ex, n, 0);
     buf_snap(ex, n);
     fflush(passes_f);
 out:
@@ -967,6 +1029,33 @@ out:
     plat_mutex_unlock(&rec_lock);
 }
 
+// A render-target clear (colour or depth), logged before the pass that follows it: the dump showed only texture clears
+// (OP_CLEAR_TEX). flicker/tools/passdiff.py reads "clear-rt before pass N: ..." as a clear of that image before pass N.
+void vk_dump_clear_rt(VkExec *ex, uint32_t op, const void *payload) {
+    plat_mutex_lock(&rec_lock);
+    if (!active()) goto out;
+    const VkExecTarget *t = NULL;
+    const char *what = "depth";
+    int idx = -1;
+    uint32_t mask = 0;
+    if (op == OP_CLEAR_COLOR) {
+        const p_clear_color *c = payload;
+        what = "colour", idx = c->index, mask = (uint32_t)c->mask;
+        if (c->index >= 0 && c->index < 8) t = &ex->color[c->index];
+    } else {
+        const p_clear_ds *c = payload;
+        mask = (uint32_t)(c->depth_mask ? 1 : 0) | (uint32_t)(c->stencil_mask ? 2 : 0);
+        t = &ex->depth;
+    }
+    if (t && t->image)
+        fprintf(passes_f, "clear-rt before pass %d: %s idx %d mask %#x vkimage %p %ux%u level %u layers %u+%u\n", seq, what, idx,
+                mask, (void *)t->image, t->width, t->height, t->level, t->base_layer, t->layers);
+    else
+        fprintf(passes_f, "clear-rt before pass %d: %s idx %d mask %#x no renderable target\n", seq, what, idx, mask);
+out:
+    plat_mutex_unlock(&rec_lock);
+}
+
 static void make_dirs(char *path) { plat_file_mkdir_p(path); }
 
 // NX2NAVI_DUMP_WHITE=1 (diagnosis): no frame is named; from frame 1800 each present looks at the thumbnail of the frame
@@ -1001,6 +1090,23 @@ static void open_files(void) {
     if (!passes_f || !images_f) rt_fatal("vk_dump: cannot write to %s", dir);
 }
 
+// NX2NAVI_DUMP_TICKS=<lo>-<hi>[,...]: the frame after a present at which frame_step_ticks (the input script's tick) is in a
+// range is dumped like a NX2NAVI_DUMP frame, to dir/f<frame>; its passes.txt starts and ends with a line giving the tick.
+static uint64_t tick_lo[8], tick_hi[8];
+static int n_tick;
+
+static void tick_arm(uint64_t frame) {   // at the present of `frame`: dump the next frame if the tick is in a range
+    uint64_t t = frame_step_ticks();
+    int in = 0;
+    for (int i = 0; i < n_tick; i++) in |= t >= tick_lo[i] && t <= tick_hi[i];
+    if (!in) return;
+    snprintf(dir, sizeof dir, "%s/f%llu", base_dir, (unsigned long long)(frame + 1));
+    open_files();
+    fprintf(passes_f, "# frame %llu: armed at the present of frame %llu, script tick %llu\n", (unsigned long long)(frame + 1),
+            (unsigned long long)frame, (unsigned long long)t);
+    dump_frame = frame + 1;
+}
+
 static uint64_t dump_every;   // NX2NAVI_DUMP_EVERY
 
 void vk_dump_init(void) {
@@ -1017,10 +1123,16 @@ void vk_dump_init(void) {
         while ((*q == ':' || *q == ',') && movie_n < 8) movie_at[movie_n++] = strtoull(q + 1, &q, 10);
         if (movie_k < 1 || !movie_n) movie_k = 0;
     }
+    const char *dt = cfg_get("NX2NAVI_DUMP_TICKS");
+    for (char *q = (char *)dt; q && *q && n_tick < 8; q += *q == ',') {
+        tick_lo[n_tick] = strtoull(q, &q, 10);
+        tick_hi[n_tick] = *q == '-' ? strtoull(q + 1, &q, 10) : tick_lo[n_tick];
+        n_tick++;
+    }
     if (dump_white || dump_after) {
         dump_frame = UINT64_MAX;
         vk_thumbs_enable(16);
-    } else if (movie_k) {
+    } else if (movie_k || n_tick) {
         dump_frame = UINT64_MAX;
     } else if (!e || !*e || !(dump_frame = strtoull(e, NULL, 10))) return;
     const char *lf = cfg_get("NX2NAVI_DUMP_LOG");
@@ -1038,6 +1150,11 @@ void vk_dump_init(void) {
         w[0] = (uint32_t)strtoul(q, &q, 10);
         w[1] = *q == 'x' ? (uint32_t)strtoul(q + 1, &q, 10) : 0;
     }
+    const char *rdv = cfg_get("NX2NAVI_DUMP_READ");
+    for (char *q = (char *)rdv; q && *q && rd_nsize < 8; q += *q == ',') {
+        rd_size[rd_nsize][0] = (uint32_t)strtoul(q, &q, 10);
+        rd_size[rd_nsize++][1] = *q == 'x' ? (uint32_t)strtoul(q + 1, &q, 10) : 0;
+    }
     const char *d = cfg_get("NX2NAVI_DUMP_DIR");
     snprintf(base_dir, sizeof base_dir, "%s", d && *d ? d : "dump");
     snprintf(dir, sizeof dir, "%s", base_dir);
@@ -1045,7 +1162,7 @@ void vk_dump_init(void) {
     const char *ev = cfg_get("NX2NAVI_DUMP_EVERY");   // <frames>: dump again that many frames later, each in dir/f<frame>
     dump_every = ev && *ev && !dump_white ? strtoull(ev, NULL, 10) : 0;
     if (dump_every) snprintf(dir, sizeof dir, "%s/f%llu", base_dir, (unsigned long long)dump_frame);
-    if (!dump_white && !movie_k) open_files();
+    if (!dump_white && !movie_k && !n_tick) open_files();
     const char *bf = cfg_get("NX2NAVI_DUMP_BUF");
     if (bf && *bf) {
         char *q;
@@ -1106,6 +1223,7 @@ void vk_dump_present(uint64_t frame) {
         dump_frame = frame + 1;
         rt_log("vk_dump: frame %llu goes to %s", (unsigned long long)dump_frame, dir);
     }
+    if (n_tick && dump_frame == UINT64_MAX) tick_arm(frame);
     if (frame != dump_frame) return;
     plat_mutex_lock(&rec_lock);
     finished = 1;
@@ -1116,6 +1234,7 @@ void vk_dump_present(uint64_t frame) {
     images_f = NULL;
     if (bufs_f) fclose(bufs_f), bufs_f = NULL;
     plat_mutex_unlock(&img_lock);
+    if (n_tick) fprintf(passes_f, "# frame %llu: presented, script tick %llu\n", (unsigned long long)frame, (unsigned long long)frame_step_ticks());
     fclose(passes_f);
     passes_f = NULL;
     rt_log("vk_dump: frame %llu: %d passes and dispatches, about %llu MB of PNGs in %s", (unsigned long long)frame, seq,
@@ -1131,7 +1250,7 @@ void vk_dump_present(uint64_t frame) {
         plat_mutex_unlock(&rec_lock);
         return;
     }
-    if (dump_white || movie_k) {   // ready for another dump (vk_dump_present checks a white one's thumbnail 3 presents on)
+    if (dump_white || movie_k || n_tick) {   // ready for another dump (vk_dump_present checks a white one's thumbnail 3 presents on)
         if (dump_white) white_last = frame;
         plat_mutex_lock(&rec_lock);
         seq = copied = 0, last_targets = 0, pass_skip = NULL, png_bytes = 0;
@@ -1139,5 +1258,6 @@ void vk_dump_present(uint64_t frame) {
         dump_frame = UINT64_MAX;
         finished = 0;
         plat_mutex_unlock(&rec_lock);
+        if (n_tick) tick_arm(frame);   // the next frame too, while the tick is in a range
     }
 }

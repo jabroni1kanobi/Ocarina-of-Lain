@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "flight.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_tex.h"
@@ -386,6 +387,7 @@ void vk_exec_noatt_dims(const VkExec *ex, uint32_t *w, uint32_t *h) {
 static void resolve_rt(VkExec *ex) {
     if (ex->rt_resolved) return;
     ex->rt_resolved = 1;
+    uint64_t fx0 = FX_T0();
     const p_set_rt *r = &ex->rt;
     int n = r->n < 0 ? 0 : r->n > 8 ? 8 : r->n;
     uint32_t w = UINT32_MAX, h = UINT32_MAX, layers = UINT32_MAX, samples = 0, scale = 1;
@@ -427,6 +429,7 @@ static void resolve_rt(VkExec *ex) {
     ex->pass_ncolor = (uint32_t)n;
     ex->pass_samples = samples ? samples : 1;
     ex->pipe.samples = (uint8_t)ex->pass_samples;
+    FX_ADD(FX_RT, fx0);
 }
 
 // The attachment view of a target. A registered texture's view lives as long as its image (vk_exec_target_view); any
@@ -1165,8 +1168,8 @@ static const op_hdr *walk(VkExec *ex, const op_hdr *h, int depth) {
             walk(ex, nvn_op_first(((const p_jump *)a)->target), depth + 1);
             break;
         case OP_SET_RT: set_rt(ex, a); break;
-        case OP_CLEAR_COLOR: clear_color(ex, a); break;
-        case OP_CLEAR_DS: clear_ds(ex, a); break;
+        case OP_CLEAR_COLOR: if (vk_dump_armed) vk_dump_clear_rt(ex, h->op, a); clear_color(ex, a); break;
+        case OP_CLEAR_DS: if (vk_dump_armed) vk_dump_clear_rt(ex, h->op, a); clear_ds(ex, a); break;
         case OP_VIEWPORTS: {
             const p_viewports *v = a;
             for (int i = 0; i < v->n && v->first + i < 16; i++)
@@ -1225,9 +1228,16 @@ static const op_hdr *walk(VkExec *ex, const op_hdr *h, int depth) {
             if (vk_dump_armed) vk_dump_copy(ex, h->op, a);
             // fall through
         case OP_SIGNAL_EVENT: case OP_REPORT_COUNTER: case OP_RESET_COUNTER: case OP_RENDER_ENABLE: case OP_RENDER_COND:
-        case OP_CLEAR_BUF:
+        case OP_CLEAR_BUF: {
+            uint64_t fx0 = FX_T0();   // NX2NAVI_FLIGHT_X: the transfer ops' time, and the longest one
             vk_exec_op_xfer(ex, h->op, a);
+            if (fx0) {
+                uint64_t d = kern_now_ns() - fx0;
+                flight_x_rec.xfer += d, flight_x_rec.xfer_n++;
+                if (d > flight_x_rec.xfer_max) flight_x_rec.xfer_max = d, flight_x_rec.xfer_max_op = h->op;
+            }
             break;
+        }
         case OP_WAIT_EVENT:
             if (!vk_exec_wait_event(a) && depth == 0 && evo_queue) {
                 vk_exec_pass_end(ex);
@@ -1248,7 +1258,9 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
     const tex_t *keep[9];   // the render targets carry over to this submission (set_rt compares them by pointer)
     memcpy(keep, ex->rt.color, sizeof ex->rt.color);
     keep[8] = ex->rt.depth;
+    uint64_t fx0 = FX_T0(), fx1;   // NX2NAVI_FLIGHT_X: the recording's stages (flight_x_rec, under vk_sync_submit's lock)
     nvn_pins_sweep(nvn_submit_count(), keep, 9);
+    if (fx0) flight_x_rec.pins += (fx1 = kern_now_ns()) - fx0;
     ex->cb = cb;
     ex->fence = fence;
     ex->recorded = 0;
@@ -1269,7 +1281,10 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
     int slot = evo ? evq_slot(gfx_submit_queue) : -1;
     if (evo && slot < 0) evo = 0;
     if (n) {
+        fx1 = FX_T0();
         vk_mem_mirror_begin();
+        if (fx1) flight_x_rec.mirror += kern_now_ns() - fx1;
+        fx1 = FX_T0();
         if (evo_pending) {   // the uniform snapshot covers what held submissions bind too: they may go on here
             int tot = n;
             for (int s = 0; s < EVO_QUEUES; s++)
@@ -1283,7 +1298,9 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
             vk_usnap_begin(all, tot, fence);
             free(all);
         } else vk_usnap_begin(handles, n, fence);
+        if (fx1) flight_x_rec.usnap += kern_now_ns() - fx1;
     }
+    fx1 = FX_T0();
     for (int i = 0; i < n; i++)
         if (!handles[i]) rt_fatal("vk: command handle %d of a submission is null", i);
     if (evo_pending) evo_resume(ex);   // signals the CPU gave since, and holds past CONT_MAX
@@ -1303,7 +1320,14 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
     vk_exec_pass_end(ex);
     x_here = 0;
     if (ex->recorded) vk_exec_barrier(ex);   // later submissions see this one's writes
-    if (n) ex->recorded += vk_mem_mirror_end(ex->cb, fence), vk_usnap_end(fence);   // VRAM mirror bytes the GPU wrote go back to guest memory
+    if (fx1) flight_x_rec.walk += kern_now_ns() - fx1;
+    if (n) {   // VRAM mirror bytes the GPU wrote go back to guest memory
+        fx1 = FX_T0();
+        ex->recorded += vk_mem_mirror_end(ex->cb, fence);
+        uint64_t fx2 = fx1 ? kern_now_ns() : 0;
+        vk_usnap_end(fence);
+        if (fx1) flight_x_rec.mirror += fx2 - fx1, flight_x_rec.usnap += kern_now_ns() - fx2;
+    }
     if (ex->nviews) {
         ViewList *l = malloc(sizeof *l + sizeof(VkImageView) * (size_t)ex->nviews);
         if (!l) rt_fatal("vk: out of memory");

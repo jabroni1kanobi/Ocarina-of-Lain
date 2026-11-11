@@ -139,6 +139,8 @@ typedef struct { uint64_t base, size; uint32_t state, attr, perm, ipc, device, p
 void mem_init(void);                                       // reserve every region; on a collision re-run the process
                                                            // (up to 20 times, NX2NAVI_REEXEC), then fatal
 const RtGuestLayout *mem_layout(void);
+void mem_commit_stack(uint64_t a, uint64_t n);             // commits [a, a+n) of the stack region (the main thread's
+                                                           // stack); fatal on failure
 uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr);                      // 0x01
 uint32_t mem_set_permission(uint64_t a, uint64_t n, uint32_t perm);             // 0x02
 uint32_t mem_set_attribute(uint64_t a, uint64_t n, uint32_t mask, uint32_t at); // 0x03

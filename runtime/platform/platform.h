@@ -93,6 +93,15 @@ enum { PLAT_PRIO_IDLE = -15, PLAT_PRIO_LOWEST = -2, PLAT_PRIO_BELOW_NORMAL = -1,
 void plat_thread_priority(int prio);
 void plat_thread_set_priority(PlatThread *t, int prio);
 int plat_thread_priority_get(void);       // the calling thread's level
+uint64_t plat_thread_cycles(void);        // CPU the calling thread has used: cycles on Windows (QueryThreadCycleTime), ns on Linux
+int plat_cpu_number(void);                // the logical processor the calling thread is on now
+uint64_t plat_idle_cycles(int cpu);       // cycles that logical processor has idled since boot (Windows; 0 elsewhere)
+uint64_t plat_page_faults(void);          // the process's page faults so far (Windows; 0 elsewhere)
+extern int plat_reserve_cpu_sets;         // set to 1 before plat_reserve_core: reserve by CPU sets too (2 applied, -1 failed)
+extern int plat_reserve_guard;            // set to 1 before plat_reserve_core: a helper holds the core's second logical
+                                          // processor while the owner asks (2 running, -1 failed); win32.c
+void plat_core_guard(int on);             // the reserved core's owner: a stretch that needs the whole core starts / ends
+uint64_t plat_core_guard_cycles(void);    // cycles the helper has run (0 without one)
 void plat_yield(void);                    // gives the rest of the time slice to another ready thread
 static inline void plat_pause(void) {     // spin-wait hint
 #if defined(__x86_64__) || defined(_M_X64)
@@ -214,8 +223,15 @@ int plat_mem_commit(uint64_t addr, size_t n);             // read-write pages in
 int plat_mem_decommit(uint64_t addr, uint64_t n);          // contents dropped: committed again, the pages read zero
 int plat_mem_protect(uint64_t addr, uint64_t n, int prot); // committed pages only; 1 on success
 // The page at addr: PLAT_PROT_* when committed, else PLAT_MEM_RESERVED or PLAT_MEM_FREE (not reserved by us). *end
-// gets the end of the run of pages in the same state, at most limit.
+// gets the end of the run of pages in the same state, at most limit. For a watched reservation the answer comes from
+// the platform's own record of the calls above and costs no more than the pages up to limit; the caller keeps those
+// calls from running at the same time as the question (memory.c: frz_lock).
 int plat_mem_state(uint64_t addr, uint64_t limit, uint64_t *end);
+// plat_mem_check = 1 (NX2NAVI_FREEZE_CHECK, set by memory.c): each such answer is also asked of the system, which is
+// slow on Windows (win32.c). plat_mem_checked counts the answers compared, plat_mem_differed those where the system's
+// differed (a line each on stderr for the first 20; the system's answer is then the one returned).
+extern int plat_mem_check;
+extern volatile int64_t plat_mem_checked, plat_mem_differed;
 // The process's committed private memory and the part of it mapped write-combined (Windows PAGE_WRITECOMBINE: memory
 // the GPU driver maps uncached for the CPU), with the number of allocations that part spans. 0 where unsupported.
 int plat_mem_census(uint64_t *priv, uint64_t *wc, uint64_t *wc_allocs);

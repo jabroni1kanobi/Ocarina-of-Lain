@@ -80,6 +80,47 @@ void plat_thread_detach(PlatThread *t) {
     t->h = NULL;
 }
 
+// Sibling guard (plat_reserve_guard). Affinity and CPU sets keep our own threads off the reserved core, but nothing a
+// process does keeps OTHER processes off it: when the game's threads keep the other cores busy, Windows places a foreign
+// thread on the reserved core's idle second logical processor, and the owner then shares one physical core (lab fx4:
+// in the slow frames that logical processor was busy for the whole frame and the recording ran 1.3-1.8x slower, same
+// work, on the CPU throughout). With the guard the owner keeps the first logical processor and a helper thread holds
+// the second one while the owner says so (plat_core_guard): it spins on PAUSE at the top dynamic priority, which
+// leaves nearly the whole core to the owner and no idle logical processor for anybody else, and sleeps otherwise.
+int plat_reserve_guard;
+static volatile LONG guard_on;
+static HANDLE guard_ev, guard_thread;
+static DWORD guard_owner;
+static ULONG guard_ids[64], guard_nids;
+
+static DWORD WINAPI guard_main(void *arg) {
+    if (guard_nids) SetThreadSelectedCpuSets(GetCurrentThread(), guard_ids, guard_nids);
+    SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)(uintptr_t)arg);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    SetThreadDescription(GetCurrentThread(), L"core guard");
+    for (;;) {
+        WaitForSingleObject(guard_ev, INFINITE);
+        while (guard_on) YieldProcessor();
+    }
+    return 0;
+}
+
+void plat_core_guard(int on) {
+    if (!guard_ev || GetCurrentThreadId() != guard_owner) return;
+    if (on) {
+        guard_on = 1;
+        SetEvent(guard_ev);
+    } else {
+        guard_on = 0;
+    }
+}
+
+uint64_t plat_core_guard_cycles(void) {
+    ULONG64 c = 0;
+    if (guard_thread) QueryThreadCycleTime(guard_thread, &c);
+    return (uint64_t)c;
+}
+
 // Gives the calling thread physical core `core` (-1: the last) to itself: the calling thread gets that core's logical
 // processors, every other thread of the process (Toolhelp's snapshot: game, runtime and driver threads) and every
 // thread plat_thread_new creates later get the rest. Returns the threads moved, -1 if not possible; *got: the core's mask.
@@ -121,6 +162,46 @@ int plat_reserve_core(int core, uint64_t *got) {
         CloseHandle(snap);
     }
     SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)mine);
+    // plat_reserve_cpu_sets: also by CPU sets, which every thread without a selected set follows, so the threads the
+    // driver, the frame generation library and Windows' thread pool create LATER stay off the core too (the affinity
+    // sweep above only reaches the threads that exist now and plat_thread_new's).
+    if (plat_reserve_cpu_sets) {
+        ULONG clen = 0;
+        GetSystemCpuSetInformation(NULL, 0, &clen, GetCurrentProcess(), 0);
+        SYSTEM_CPU_SET_INFORMATION *ci = clen ? malloc(clen) : NULL;
+        ULONG ids_o[64], ids_m[64], no = 0, nm = 0;
+        if (ci && GetSystemCpuSetInformation(ci, clen, &clen, GetCurrentProcess(), 0))
+            for (ULONG off = 0; off < clen;) {
+                SYSTEM_CPU_SET_INFORMATION *e = (void *)((char *)ci + off);
+                if (e->Type == CpuSetInformation && e->CpuSet.Group == 0 && e->CpuSet.LogicalProcessorIndex < 64) {
+                    uint64_t bit = 1ull << e->CpuSet.LogicalProcessorIndex;
+                    if ((bit & mine) && nm < 64) ids_m[nm++] = e->CpuSet.Id;
+                    else if ((bit & others) && no < 64) ids_o[no++] = e->CpuSet.Id;
+                }
+                if (!e->Size) break;
+                off += e->Size;
+            }
+        free(ci);
+        plat_reserve_cpu_sets = no && nm && SetProcessDefaultCpuSets(GetCurrentProcess(), ids_o, no) &&
+                                SetThreadSelectedCpuSets(GetCurrentThread(), ids_m, nm) ? 2 : -1;   // 2 applied, -1 failed
+        if (plat_reserve_cpu_sets == 2) memcpy(guard_ids, ids_m, nm * sizeof ids_m[0]), guard_nids = nm;
+    }
+    if (plat_reserve_guard) {   // the owner on the core's first logical processor, the helper on the rest of it
+        uint64_t lo = mine & (~mine + 1), hi = mine & ~lo;
+        plat_reserve_guard = -1;   // 2 running, -1 failed (a core with one logical processor needs none)
+        if (hi && (guard_ev = CreateEventW(NULL, FALSE, FALSE, NULL))) {
+            guard_owner = self;
+            SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)lo);
+            guard_thread = CreateThread(NULL, 64 << 10, guard_main, (void *)(uintptr_t)hi, 0, NULL);
+            if (guard_thread) {
+                plat_reserve_guard = 2;
+            } else {
+                SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)mine);
+                CloseHandle(guard_ev);
+                guard_ev = NULL;
+            }
+        }
+    }
     *got = mine;
     return moved;
 }
@@ -371,6 +452,22 @@ uint32_t plat_cpu_usable(void) {
 void plat_thread_priority(int prio) { SetThreadPriority(GetCurrentThread(), prio); }
 void plat_thread_set_priority(PlatThread *t, int prio) { SetThreadPriority(t->h, prio); }
 int plat_thread_priority_get(void) { return GetThreadPriority(GetCurrentThread()); }
+uint64_t plat_thread_cycles(void) { ULONG64 c = 0; QueryThreadCycleTime(GetCurrentThread(), &c); return (uint64_t)c; }
+int plat_cpu_number(void) { return (int)GetCurrentProcessorNumber(); }
+int plat_reserve_cpu_sets;
+// Cycles logical processor `cpu` (group 0) has spent idle since boot; 0 when unknown.
+uint64_t plat_idle_cycles(int cpu) {
+    ULONG64 idle[64];
+    ULONG len = sizeof idle;
+    if (cpu < 0 || cpu >= 64 || !QueryIdleProcessorCycleTime(&len, idle) || (ULONG)cpu >= len / sizeof idle[0]) return 0;
+    return (uint64_t)idle[cpu];
+}
+
+// The process's page faults so far (soft and hard; wraps at 2^32).
+uint64_t plat_page_faults(void) {
+    PROCESS_MEMORY_COUNTERS pmc = {.cb = sizeof pmc};
+    return GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc) ? pmc.PageFaultCount : 0;
+}
 
 void plat_yield(void) { SwitchToThread(); }
 
@@ -695,6 +792,37 @@ int plat_file_list(const char *dir, const char *ext, int (*cb)(const char *name,
 }
 
 // ---- virtual memory: VirtualAlloc reservations, MEM_WRITE_WATCH for the watched ones.
+//
+// A byte per 4 KiB page of each watched reservation records what the calls below last made of the page, and
+// plat_mem_state answers from it there (linux.c keeps such a table for every page). The system is not asked:
+// VirtualQuery sizes the whole run of same-state pages that starts at the address, however little the caller wants to
+// know, which took 8-9 ms with 1 GiB of written read-write memory behind the page. A freeze of one 2 MiB region
+// (memory.c freeze_locked) paid that on the game's main thread each time a streamed texture's region froze again: one
+// frame of 20 ms and more at the same places of a route. Every change of these pages goes through the calls below
+// (tools/check_platform.py keeps the Virtual* calls in this file), and memory.c makes them one at a time (its frz_lock),
+// so the table is the system's state whenever memory.c asks. Other ranges are asked of the system as before.
+#define WPG 4096ull
+enum { WPS_RESERVED, WPS_NONE, WPS_READ, WPS_RW };   // WPS_NONE.. are committed: PLAT_PROT_* + WPS_NONE
+typedef struct { uint64_t base, size; uint8_t *st; } WatchedRes;
+static WatchedRes wres[4];
+static int nwres;   // grows at start-up only (plat_mem_reserve), an entry complete before it counts
+int plat_mem_check;
+volatile int64_t plat_mem_checked, plat_mem_differed;
+
+static const WatchedRes *wres_of(uint64_t addr) {
+    for (int i = 0; i < nwres; i++)
+        if (addr - wres[i].base < wres[i].size) return &wres[i];
+    return NULL;
+}
+
+// After the system call succeeded: every page with a byte in [addr, addr + n), as the system rounds.
+static void wps_set(uint64_t addr, uint64_t n, uint8_t v) {
+    const WatchedRes *w = n ? wres_of(addr) : NULL;
+    if (!w) return;
+    uint64_t lo = (addr - w->base) / WPG, hi = (addr - w->base + n + WPG - 1) / WPG;
+    if (hi > w->size / WPG) hi = w->size / WPG;
+    memset(w->st + lo, v, (size_t)(hi - lo));
+}
 
 int plat_mem_reserve(uint64_t addr, uint64_t n, int watch) {
     void *p = VirtualAlloc((void *)(uintptr_t)addr, n, MEM_RESERVE | (watch ? MEM_WRITE_WATCH : 0), PAGE_NOACCESS);
@@ -702,25 +830,69 @@ int plat_mem_reserve(uint64_t addr, uint64_t n, int watch) {
         VirtualFree(p, 0, MEM_RELEASE);
         p = NULL;
     }
+    if (p && watch && nwres < (int)(sizeof wres / sizeof *wres)) {
+        // Zero pages: WPS_RESERVED. Without the table the system answers for this reservation, as for other ranges.
+        uint8_t *st = VirtualAlloc(NULL, (size_t)((n + WPG - 1) / WPG), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (st) {
+            wres[nwres] = (WatchedRes){addr, n, st};
+            nwres++;
+        }
+    }
     return p != NULL;
 }
 
 void *plat_mem_alloc(size_t n) { return VirtualAlloc(NULL, n, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE); }
 
+// Pages already committed become read-write as well.
 int plat_mem_commit(uint64_t addr, size_t n) {
-    return VirtualAlloc((void *)(uintptr_t)addr, n, MEM_COMMIT, PAGE_READWRITE) != NULL;
+    if (!VirtualAlloc((void *)(uintptr_t)addr, n, MEM_COMMIT, PAGE_READWRITE)) return 0;
+    wps_set(addr, n, WPS_RW);
+    return 1;
 }
 
 // Decommitted pages come back zeroed when committed again.
-int plat_mem_decommit(uint64_t addr, uint64_t n) { return VirtualFree((void *)(uintptr_t)addr, n, MEM_DECOMMIT) != 0; }
+int plat_mem_decommit(uint64_t addr, uint64_t n) {
+    if (!VirtualFree((void *)(uintptr_t)addr, n, MEM_DECOMMIT)) return 0;
+    wps_set(addr, n, WPS_RESERVED);
+    return 1;
+}
 
 int plat_mem_protect(uint64_t addr, uint64_t n, int prot) {
     DWORD old;
     DWORD p = prot == PLAT_PROT_RW ? PAGE_READWRITE : prot == PLAT_PROT_READ ? PAGE_READONLY : PAGE_NOACCESS;
-    return VirtualProtect((void *)(uintptr_t)addr, n, p, &old) != 0;
+    if (!VirtualProtect((void *)(uintptr_t)addr, n, p, &old)) return 0;
+    wps_set(addr, n, (uint8_t)(WPS_NONE + prot));
+    return 1;
 }
 
+static int sys_mem_state(uint64_t addr, uint64_t limit, uint64_t *end);
+
 int plat_mem_state(uint64_t addr, uint64_t limit, uint64_t *end) {
+    const WatchedRes *w = wres_of(addr);
+    if (!w) return sys_mem_state(addr, limit, end);
+    uint64_t i = (addr - w->base) / WPG, n = w->size / WPG, j = i + 1;
+    uint8_t v = w->st[i];
+    while (j < n && w->base + j * WPG < limit && w->st[j] == v) j++;
+    uint64_t e = w->base + j * WPG;
+    *end = e < limit ? e : limit;
+    int st = v == WPS_RESERVED ? PLAT_MEM_RESERVED : v - WPS_NONE;
+    if (plat_mem_check) {   // NX2NAVI_FREEZE_CHECK: the system's answer too (slow, see above); it wins where they differ
+        uint64_t e2;
+        int s2 = sys_mem_state(addr, limit, &e2);
+        plat_inc64(&plat_mem_checked);
+        if (s2 != st || e2 != *end) {
+            if (plat_inc64(&plat_mem_differed) <= 20)
+                fprintf(stderr, "platform: page table and system differ at %#llx (limit %#llx): table %d to %#llx, "
+                        "system %d to %#llx\n", (unsigned long long)addr, (unsigned long long)limit, st,
+                        (unsigned long long)*end, s2, (unsigned long long)e2);
+            *end = e2;
+            return s2;
+        }
+    }
+    return st;
+}
+
+static int sys_mem_state(uint64_t addr, uint64_t limit, uint64_t *end) {
     MEMORY_BASIC_INFORMATION mbi;
     if (!VirtualQuery((void *)(uintptr_t)addr, &mbi, sizeof mbi)) {
         *end = limit;

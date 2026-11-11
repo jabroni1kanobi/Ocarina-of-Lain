@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "flight.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_hmap.h"
@@ -1999,6 +2000,7 @@ static void pool_dirty_slot(int id, void *arg) {   // vk_texture_dirty_slots_loc
     uint64_t t = vk_texture_slot_token(id);
     if (t == PL.tok[id]) return;
     PL.n_refill++;
+    if (flight_x_on) plat_add64(&flight_x_ns[FX_POOL_REFILL], 1000000);
     if (t >> 32 != PL.tok[id] >> 32) PL.n_by_reg++;
     else PL.n_by_addr++;
     if (pool_fill(d->ex, (uint32_t)id, d->used, t)) PL.tok[id] = t;
@@ -2013,6 +2015,7 @@ static void pool_sync_entries(VkExec *ex) {
     vk_texture_lock();
     uint64_t tb = kern_now_ns();
     PL.t_lock += tb - ta, PL.n_sync++;
+    if (flight_x_on) plat_add64(&flight_x_ns[FX_POOL_LOCK], (int64_t)(tb - ta));
     uint32_t fresh = used & ~PL.kinds;
     int n = vk_texture_slot_count_locked();
     if (n > VK_POOL_TEX) n = VK_POOL_TEX;
@@ -2036,11 +2039,13 @@ static void pool_sync_entries(VkExec *ex) {
         uint64_t tw = kern_now_ns();
         if (walked) PL.t_dirty += tw - tb, PL.n_dirty++;
         else PL.n_full++;
+        if (!walked && flight_x_on) plat_add64(&flight_x_ns[FX_POOL_FULL], 1000000);
         if (!walked) PL.dirty_pos = vk_texture_dirty_pos_locked();
         for (int id = 0; id < n && !walked; id++) {   // slots past n were never registered: stand-ins since the first sync
             uint64_t t = vk_texture_slot_token(id);
             if (t != PL.tok[id]) {
                 PL.n_refill++;
+                if (flight_x_on) plat_add64(&flight_x_ns[FX_POOL_REFILL], 1000000);
                 if (t >> 32 != PL.tok[id] >> 32) PL.n_by_reg++;
                 else PL.n_by_addr++;
                 if (pool_fill(ex, (uint32_t)id, used, t)) PL.tok[id] = t;
@@ -2565,6 +2570,34 @@ static void write_set(const VkPipeInfo *info, uint32_t s, VkDescriptorSet set, c
 // graphics push equal to the last one at its set number, with no other layout or bind between, is not recorded.
 // The descriptors go into one packed array d, a VkDescSlot per descriptor in binding order, which a set's update
 // template reads directly (VkPipeInfo.tpl); write structs are filled only when a set has no template.
+// History carry (NX2NAVI_HISTORY_CARRY, vk_texture.c vk_texture_sample_locked): a texture slot needs the hook once per frame
+// while it resolves as before. HK keeps the frame and slot token of the slot's last full hook and tests them with
+// slot_still, as the TD memo does: a repeat binding costs a hash and three compares, no lookup. Direct-mapped, so a
+// collision only sends the next binding through the full call. Texture lock held.
+#define HK_N 8192
+static struct { uint64_t frame, tok; uint32_t id1, gen; } HK[HK_N];
+
+// Who reads (rbw_who): inside a dispatch the compute shader's identity,
+// the first 8 bytes of the shader's cache key (a content hash, never a pointer); 0 for
+// draws. Together with the binding's slot index it names "the same program at the same slot" across frames and layouts.
+static uint64_t hc_cs;
+static uint64_t shader_who(const GfxShader *s) {   // the first 8 bytes of the 32-byte cache key: a content hash, no table
+    uint64_t kw;
+    memcpy(&kw, gfx_shader_key(s), 8);
+    return kw ? kw : 1;   // 0 means "a draw"
+}
+
+static void history_hook(VkExec *ex, uint64_t h, int slot) {
+    uint32_t id = (uint32_t)(h & 0xfffff);
+    uint64_t F = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1;
+    typeof(HK[0]) *m = &HK[id * 0x9E3779B1u >> 19];
+    uint32_t gen = vk_texture_slots_gen();   // before any lookup
+    if (m->id1 == id + 1 && m->frame == F && slot_still(&m->gen, m->tok, h, gen)) return;
+    uint64_t tok = token_of(h);   // before the lookup
+    uint64_t who = hc_cs ? hc_cs + (uint64_t)(slot + 1) * 0x9E3779B97F4A7C15ull : 0;   // only the full call below uses it: a hit is not its first use of the frame
+    if (vk_texture_sample_locked((int)id, ex->in_pass, who)) *m = (typeof(*m)){F, tok, id + 1, gen};
+}
+
 static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
     static VkWriteDescriptorSet w[MAX_BINDINGS];
     static VkDescSlot d[MAX_DESC];
@@ -2640,6 +2673,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
                     uint64_t h = 0;
                     if (img) h = slot >= 0 && slot < 32 ? ex->img[st][slot] : 0;
                     else h = slot >= 0 && slot < 128 ? ex->tex[st][slot] : 0;
+                    if (vk_history_carry && !img && h) history_hook(ex, h, slot);   // first use of a frame: history carry
                     tex_info(ex, r, h, img, r->separate, &o[k].image);
                     o[k].w[2] = (uint32_t)o[k].image.imageLayout;   // zero the tail padding
                 }
@@ -2724,7 +2758,9 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
         }
     }
     if (info->pool) {   // set 2: the texture and sampler pools
+        uint64_t fx0 = FX_T0();
         pool_sync(ex);
+        FX_ADD(FX_POOL, fx0);
         vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, 2, 1, &PL.set, 0, NULL);
         RS.volatile_ = 1;   // the pools may change under an equal draw: build the next one again
     }
@@ -3125,7 +3161,9 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
     }
     record_fixed(ex);
     repeat_stats(ex, info);
+    uint64_t fxb = FX_T0();
     bind_resources(ex, info);
+    FX_ADD(FX_BIND, fxb);
     if (fbl & ex->fb_dirty) feedback_barrier(ex);
     feedback_written(ex, &s, fbl);
     if (!mesh) bind_vertex_buffers(ex);
@@ -4519,9 +4557,9 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     vk_exec_barrier(ex);   // ends the pass; earlier writes are visible to the shader
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_COMPUTE, p);
     c0_dim[0] = (uint32_t)d->x, c0_dim[1] = (uint32_t)d->y, c0_dim[2] = (uint32_t)d->z;
-    twin_dispatch = 1;
+    twin_dispatch = 1, hc_cs = vk_history_carry ? shader_who(cs) : 0;
     bind_resources(ex, info);
-    twin_dispatch = 0;
+    twin_dispatch = 0, hc_cs = 0;
     if (vk_drawset_on && vk_drawset_draw(ex, VK_DS_DISPATCH, 0, (uint32_t)d->x, (uint32_t)d->y, d->z, 0, 0, 0, d->caller,
                                          UINT32_MAX))
         return;
@@ -4564,9 +4602,9 @@ static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_COMPUTE, p);
     c0_dim[0] = c0_dim[1] = c0_dim[2] = 0;
     B.c0_valid[2] = 0;   // a fresh c0 range: the copy below must not change one an earlier dispatch reads
-    twin_dispatch = 1;
+    twin_dispatch = 1, hc_cs = vk_history_carry ? shader_who(cs) : 0;
     bind_resources(ex, info);
-    twin_dispatch = 0;
+    twin_dispatch = 0, hc_cs = 0;
     if (B.c0_valid[2]) {   // the shader binds c0
         // NVN2 programs read the group counts from c0 byte 0 (c0_info); at 0x200 their bank holds pushed constants
         // or the driver's tables, which the copy would overwrite

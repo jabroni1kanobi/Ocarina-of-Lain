@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "flight.h"
 #include "host.h"
 #include "layout.h"
 #include "platform/platform.h"
@@ -66,6 +67,9 @@ static int reserve_at(uint64_t at, uint64_t size, int watch) { return plat_mem_r
 // read) fails on a read-only page instead of faulting, so file reads thaw their buffer first (mem_thaw), and so does
 // every commit, decommit and protection change here. A region stays thawed for FRZ_HOLD_MS after a mem_thaw: a file
 // read still in flight writes its buffer later. frz_lock is a leaf lock: nothing writes guest memory under it.
+// plat_mem_state is asked under frz_lock only: for these reservations the platform answers from its record of the
+// commit, decommit and protect calls (platform.h), which all run under the same lock, so the answer is the system's
+// state and costs nothing to speak of. NX2NAVI_FREEZE_CHECK=1 has every answer compared with the system's own.
 #define FRZ_SHIFT 21
 #define FRZ_SIZE (1ull << FRZ_SHIFT)
 #define FRZ_HOLD_MS 5000u
@@ -130,6 +134,20 @@ static int freeze_locked(uint64_t r) {
     return n > 0;
 }
 
+// NX2NAVI_FREEZE_CHECK=1: what the platform's comparison of its page record with the system has found so far, after a
+// freeze (one caller at a time: the freeze pass). A difference ends the run: a frozen region with a writable page
+// would lose writes.
+static void freeze_check_note(void) {
+    static int64_t said = -1;
+    int64_t n = __atomic_load_n(&plat_mem_checked, __ATOMIC_RELAXED), d = __atomic_load_n(&plat_mem_differed, __ATOMIC_RELAXED);
+    if (d) rt_fatal("memory: freeze check: %lld of %lld page-state answers differed from the system's", (long long)d,
+                    (long long)n);
+    if (said >= 0 && n - said < 2000) return;
+    said = n;
+    rt_log("memory: freeze check: %lld page-state answers compared with the system's, none differed "
+           "(NX2NAVI_FREEZE_CHECK)", (long long)n);
+}
+
 int mem_freeze(uint64_t a) {
     if ((a & (FRZ_SIZE - 1)) || !watched(a, FRZ_SIZE)) return 0;
     uint64_t r = a >> FRZ_SHIFT;
@@ -144,6 +162,7 @@ int mem_freeze(uint64_t a) {
         ok = 1;
     }
     plat_mutex_unlock(&frz_lock);
+    if (plat_mem_check) freeze_check_note();
     return ok;
 }
 
@@ -161,13 +180,20 @@ void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws
 // The platform's write-fault hook (plat_mem_fault_hook): 1 retries the write.
 static int thaw_fault(uint64_t a) {
     if (a >= RT_ADDRESS_LIMIT || !watched(a, 1)) return 0;
+    uint64_t fx0 = FX_T0();   // NX2NAVI_FLIGHT_X: the handler's time from here (lock wait and protection change), any thread
     plat_mutex_lock(&frz_lock);
     int was = frz[a >> FRZ_SHIFT];
     thaw_locked(a >> FRZ_SHIFT, 1);
-    plat_mutex_unlock(&frz_lock);
-    if (was) return 1;
+    // Not frozen: the write runs again when the page is read-write by now (another thread thawed the region first).
+    // Asked under the lock, where no mapping change is half done.
     uint64_t end;
-    return plat_mem_state(a & ~(PAGE - 1), (a & ~(PAGE - 1)) + PAGE, &end) == PLAT_PROT_RW;
+    int rw = was || plat_mem_state(a & ~(PAGE - 1), (a & ~(PAGE - 1)) + PAGE, &end) == PLAT_PROT_RW;
+    plat_mutex_unlock(&frz_lock);
+    if (fx0) {
+        FX_ADD(FX_THAW, fx0);
+        if (was) FX_COUNT(FX_NTHAW, 1);
+    }
+    return rw;
 }
 
 // Mapping changes thaw the regions they touch and run under frz_lock, so no freeze sees them half done.
@@ -194,6 +220,10 @@ static void protect(uint64_t a, uint64_t n, int prot, const char *what) {
     plat_mutex_unlock(&frz_lock);
     if (!ok) rt_fatal("memory: protect %s %#llx+%#llx failed", what, (unsigned long long)a, (unsigned long long)n);
 }
+
+// The main thread's stack at the top of the stack region (kernel.c): a mapping change of a watched reservation like the
+// others, so under frz_lock like the others.
+void mem_commit_stack(uint64_t a, uint64_t n) { commit(a, n, "main thread stack"); }
 
 // The process is re-run when a region is taken: Windows places DLLs, heaps and thread stacks at random addresses,
 // and a fresh process gets a fresh layout.
@@ -233,6 +263,8 @@ void mem_init(void) {
     // nx2navi.ini is read here, once the address space is claimed and before the first setting: the pool size below
     // depends on NX2NAVI_APP_POOL and on the resolution settings (resolution.c decides them once, on this first call).
     cfg_init();
+    const char *chk = cfg_get("NX2NAVI_FREEZE_CHECK");
+    plat_mem_check = chk && atoi(chk);
     const char *pool = cfg_get("NX2NAVI_APP_POOL");
     L = (RtGuestLayout){
         .aslr = {low, RT_ADDRESS_LIMIT - low},

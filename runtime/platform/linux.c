@@ -448,6 +448,21 @@ static void renice(pid_t tid, int prio) {
 
 void plat_thread_priority(int prio) { renice((pid_t)syscall(SYS_gettid), prio); }
 
+uint64_t plat_thread_cycles(void) {   // ns of CPU time (NX2NAVI_FLIGHT_X; not built or run here yet)
+    struct timespec ts;
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts)) return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+int plat_cpu_number(void) {
+    unsigned cpu = 0;
+    return syscall(SYS_getcpu, &cpu, NULL, NULL) ? -1 : (int)cpu;
+}
+int plat_reserve_cpu_sets, plat_reserve_guard;
+uint64_t plat_idle_cycles(int cpu) { (void)cpu; return 0; }
+uint64_t plat_page_faults(void) { return 0; }
+void plat_core_guard(int on) { (void)on; }
+uint64_t plat_core_guard_cycles(void) { return 0; }
+
 void plat_thread_set_priority(PlatThread *t, int prio) { renice(__atomic_load_n(&t->tid, __ATOMIC_ACQUIRE), prio); }
 
 int plat_thread_priority_get(void) {
@@ -847,6 +862,8 @@ int plat_file_list(const char *dir, const char *ext, int (*cb)(const char *name,
 #define PS_LIMIT (1ull << 39)
 enum { PS_FREE, PS_RESERVED, PS_NONE, PS_READ, PS_RW };   // PS_NONE.. are committed: PLAT_PROT_* + PS_NONE
 static uint8_t *pstate;
+int plat_mem_check;                                    // nothing to compare here: pstate is the only record there is
+volatile int64_t plat_mem_checked, plat_mem_differed;
 static int ww_fd = -1, pm_fd = -1;   // userfaultfd and /proc/self/pagemap; -1 when write watch is unavailable
 static PlatMutex vm_lock = PLAT_MUTEX_INIT;
 
